@@ -2,6 +2,7 @@ import io.papermc.fill.model.BuildChannel
 import io.papermc.paperweight.attribute.DevBundleOutput
 import io.papermc.paperweight.util.*
 import java.time.Instant
+import java.util.concurrent.TimeUnit
 
 plugins {
     `java-library`
@@ -293,10 +294,57 @@ fun TaskContainer.registerRunTask(
     block(this)
 }
 
-tasks.registerRunTask("runServer") {
-    description = "Spin up a test server from the Mojang mapped server jar"
-    classpath(tasks.jar)
-    classpath(configurations.runtimeClasspath)
+val runServersClasspath = files(tasks.jar, configurations.runtimeClasspath)
+val runServersJavaLauncher = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(25))
+}
+
+tasks.register("runServers") {
+    group = "runs"
+    description = "Spin up two test servers from the Mojang mapped server jar"
+    dependsOn(tasks.jar)
+    inputs.files(runServersClasspath)
+
+    doLast {
+        val memoryGb = providers.gradleProperty("paper.runMemoryGb").getOrElse("2")
+        val runDir = rootProject.layout.projectDirectory
+            .dir(providers.gradleProperty("paper.runWorkDir").getOrElse("run"))
+            .asFile
+        // ponytail: fixed two-node dev topology; add configuration when another topology is needed.
+        val servers = listOf("server-a" to 25566, "server-b" to 25567)
+        val processes = servers.map { (name, port) ->
+            val workingDir = runDir.resolve(name).also(File::mkdirs)
+            logger.lifecycle("Starting $name on port $port in $workingDir")
+            ProcessBuilder(
+                runServersJavaLauncher.get().executablePath.asFile.absolutePath,
+                "-Xms${memoryGb}G",
+                "-Xmx${memoryGb}G",
+                "-Dnet.kyori.adventure.text.warnWhenLegacyFormattingDetected=true",
+                "-Dio.papermc.paper.suppress.sout.nags=true",
+                "-Dpaper.maxChatCommandInputSize=32767",
+                "-cp",
+                runServersClasspath.asPath,
+                "org.bukkit.craftbukkit.Main",
+                "--nogui",
+                "--port",
+                port.toString(),
+            )
+                .directory(workingDir)
+                .redirectOutput(ProcessBuilder.Redirect.INHERIT)
+                .redirectError(ProcessBuilder.Redirect.INHERIT)
+                .start()
+        }
+
+        try {
+            while (processes.all(Process::isAlive)) {
+                Thread.sleep(250)
+            }
+        } finally {
+            processes.filter(Process::isAlive).forEach(Process::destroy)
+            processes.forEach { it.waitFor(5, TimeUnit.SECONDS) }
+            processes.filter(Process::isAlive).forEach(Process::destroyForcibly)
+        }
+    }
 }
 
 tasks.registerRunTask("runDevServer") {

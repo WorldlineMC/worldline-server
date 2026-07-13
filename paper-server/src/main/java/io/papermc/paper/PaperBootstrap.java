@@ -17,6 +17,7 @@ public final class PaperBootstrap {
         SharedConstants.tryDetectVersion();
 
         getStartupVersionMessages().forEach(LOGGER::info);
+        io.papermc.paper.worldline.WorldlineControlServer.start();
 
         Main.main(options);
     }

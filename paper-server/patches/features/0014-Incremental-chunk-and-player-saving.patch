@@ -125,10 +125,10 @@ index 88173a3775734ca271d9ff6a7a253eeb343a82a4..6b6030282ccd7ee3f2d135f7f3278de6
      private static final int NEUTRAL_MOB_DEATH_NOTIFICATION_RADII_Y = 10;
      private static final int FLY_STAT_RECORDING_SPEED = 25;
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 1dbb1d49c797be89f3739c2fa226aef25f68ee87..779686f3d0c330b0c9ce4f37168503f3668b1f13 100644
+index cf9d542bb09c5b23c4ad2130d9040f91bce4beb4..9c507ef7de8d3ce054b2086a054026486b9f82fd 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -414,6 +414,7 @@ public abstract class PlayerList {
+@@ -444,6 +444,7 @@ public abstract class PlayerList {
  
      protected void save(final ServerPlayer player) {
          if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
@@ -136,7 +136,7 @@ index 1dbb1d49c797be89f3739c2fa226aef25f68ee87..779686f3d0c330b0c9ce4f37168503f3
          this.playerIo.save(player);
          ServerStatsCounter stats = player.getStats(); // CraftBukkit
          if (stats != null) {
-@@ -950,10 +951,24 @@ public abstract class PlayerList {
+@@ -980,10 +981,24 @@ public abstract class PlayerList {
      }
  
      public void saveAll() {

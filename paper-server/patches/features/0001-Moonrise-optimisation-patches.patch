@@ -24087,7 +24087,7 @@ index 23e51ce53e9b1b4f52d49749c13ccaae539c4f0e..afe68487585e5fc2766a10bf69e085f5
      // CraftBukkit start
      public boolean isDebugging() {
 diff --git a/net/minecraft/server/dedicated/DedicatedServer.java b/net/minecraft/server/dedicated/DedicatedServer.java
-index 7264b0d73ddb1d5acadc37d00892288e2b874e9c..0b6d7f99edde802cb464baa5a4b2b4a4dcce684a 100644
+index 602042c367260f7cb2c6c14938285d5df4056158..3b28b39ebf252d8de46f7d0ce27037cdb041f1b5 100644
 --- a/net/minecraft/server/dedicated/DedicatedServer.java
 +++ b/net/minecraft/server/dedicated/DedicatedServer.java
 @@ -530,7 +530,33 @@ public class DedicatedServer extends MinecraftServer implements ServerInterface
@@ -26459,7 +26459,7 @@ index a701288146a1d7cd258faae69f959edf466ec71c..3509df9dd423b38d1ca3e4a420d1352a
      }
  
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index 5e0d2bbd9223f727ec337357ee7d0088eff11ab8..3d6765f284d1817d68db4d9ae0d90c7e73e6e068 100644
+index 229035e15113419080187263c7fa5e004a12c3f3..550b915d4ed457231605247c3e21844fed2f67b6 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -54,7 +54,7 @@ import net.minecraft.world.level.storage.SavedDataStorage;
@@ -28458,10 +28458,10 @@ index af2509ed6ca1b9ed68c67bd682de3823ccb09088..d91d7d438dd79c64827de7cdfbaeb8c8
                  PrepareSpawnTask.this.loadListener.updateFocus(this.spawnLevel.dimension(), spawnChunk);
              }
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index b4845731ba1eaae582afece7e09e2af427b29d6a..1dbb1d49c797be89f3739c2fa226aef25f68ee87 100644
+index 4663dbc7907a78f2eb14d8941bee1de73de2a86e..cf9d542bb09c5b23c4ad2130d9040f91bce4beb4 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -982,8 +982,8 @@ public abstract class PlayerList {
+@@ -1012,8 +1012,8 @@ public abstract class PlayerList {
          player.connection.send(level.clockManager().createFullSyncPacket(player)); // Paper - per-world time; per-player time
          player.connection.send(new ClientboundSetDefaultSpawnPositionPacket(level.getRespawnData()));
          // Paper start - view distances
@@ -28472,7 +28472,7 @@ index b4845731ba1eaae582afece7e09e2af427b29d6a..1dbb1d49c797be89f3739c2fa226aef2
          // Paper end - view distances
          if (level.isRaining()) {
              // CraftBukkit start - handle player weather
-@@ -1200,7 +1200,7 @@ public abstract class PlayerList {
+@@ -1230,7 +1230,7 @@ public abstract class PlayerList {
  
      public void setViewDistance(final int viewDistance) {
          this.viewDistance = viewDistance;
@@ -28481,7 +28481,7 @@ index b4845731ba1eaae582afece7e09e2af427b29d6a..1dbb1d49c797be89f3739c2fa226aef2
  
          for (ServerLevel level : this.server.getAllLevels()) {
              level.getChunkSource().setViewDistance(viewDistance);
-@@ -1209,7 +1209,7 @@ public abstract class PlayerList {
+@@ -1239,7 +1239,7 @@ public abstract class PlayerList {
  
      public void setSimulationDistance(final int simulationDistance) {
          this.simulationDistance = simulationDistance;

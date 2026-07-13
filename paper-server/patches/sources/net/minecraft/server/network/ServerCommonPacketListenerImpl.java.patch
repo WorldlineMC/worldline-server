@@ -204,10 +204,14 @@
              }
  
              return false;
-@@ -158,6 +_,13 @@
+@@ -158,6 +_,17 @@
      }
  
      public void send(final Packet<?> packet, final @Nullable ChannelFutureListener listener) {
++        if (this instanceof ServerGamePacketListenerImpl game
++            && game.worldlineSuppressInitialPackets) {
++            return;
++        }
 +        // CraftBukkit start
 +        if (packet == null) {
 +            return;

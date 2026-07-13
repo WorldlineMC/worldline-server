@@ -41,7 +41,7 @@
          this.server = server;
          this.registries = registries;
          this.playerIo = playerIo;
-@@ -143,23 +_,19 @@
+@@ -143,49 +_,56 @@
          this.ipBans = new IpBanList(IPBANLIST_FILE, notificationService);
      }
  
@@ -69,8 +69,24 @@
 -        );
          LevelData levelData = level.getLevelData();
          ServerGamePacketListenerImpl playerConnection = new ServerGamePacketListenerImpl(this.server, connection, player, cookie);
++        final Integer worldlineEntityId = worldlineResumeEntityId(connection);
++        final boolean worldlineResume = worldlineEntityId != null;
++        if (worldlineResume) {
++            player.setId(worldlineEntityId);
++        }
          connection.setupInboundProtocol(
-@@ -176,8 +_,8 @@
+             GameProtocols.SERVERBOUND_TEMPLATE.bind(RegistryFriendlyByteBuf.decorator(this.server.registryAccess()), playerConnection), playerConnection
+         );
+         playerConnection.suspendFlushing();
++        playerConnection.worldlineSuppressInitialPackets = worldlineResume;
+         GameRules gameRules = level.getGameRules();
+         boolean immediateRespawn = gameRules.get(GameRules.IMMEDIATE_RESPAWN);
+         boolean reducedDebugInfo = gameRules.get(GameRules.REDUCED_DEBUG_INFO);
+         boolean doLimitedCrafting = gameRules.get(GameRules.LIMITED_CRAFTING);
+-        playerConnection.send(
+-            new ClientboundLoginPacket(
++        final ClientboundLoginPacket loginPacket = new ClientboundLoginPacket(
+                 player.getId(),
                  levelData.isHardcore(),
                  this.server.levelKeys(),
                  this.getMaxPlayers(),
@@ -81,23 +97,34 @@
                  reducedDebugInfo,
                  !immediateRespawn,
                  doLimitedCrafting,
-@@ -186,6 +_,7 @@
+                 player.createCommonSpawnInfo(level),
+                 this.server.usesAuthentication(),
                  this.server.enforceSecureProfile()
-             )
-         );
+-            )
+-        );
++            );
++        if (worldlineResume) {
++            // ponytail: M1 uses login only as the proxy-side readiness marker.
++            connection.send(loginPacket);
++        } else {
++            playerConnection.send(loginPacket);
++        }
 +        player.getBukkitEntity().sendSupportedChannels(); // CraftBukkit
          playerConnection.send(new ClientboundChangeDifficultyPacket(levelData.getDifficulty(), levelData.isDifficultyLocked()));
          playerConnection.send(new ClientboundPlayerAbilitiesPacket(player.getAbilities()));
          playerConnection.send(new ClientboundSetHeldSlotPacket(player.getInventory().getSelectedSlot()));
-@@ -205,24 +_,129 @@
+@@ -205,24 +_,149 @@
              component = Component.translatable("multiplayer.player.joined.renamed", player.getDisplayName(), oldName);
          }
  
 -        this.broadcastSystemMessage(component.withStyle(ChatFormatting.YELLOW), false);
+-        playerConnection.teleport(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot());
 +        // CraftBukkit start
 +        component.withStyle(ChatFormatting.YELLOW);
 +        Component joinMessage = component; // Paper - Adventure
-         playerConnection.teleport(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot());
++        if (!worldlineResume) {
++            playerConnection.teleport(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot());
++        }
          ServerStatus status = this.server.getStatus();
          if (status != null && !cookie.transferred()) {
              player.sendServerStatus(status);
@@ -190,6 +217,7 @@
 +        // Paper - move loading pearls / parent vehicle up
          player.initInventoryMenu();
          this.server.notificationManager().playerJoined(player);
++        playerConnection.worldlineSuppressInitialPackets = false;
          playerConnection.resumeFlushing();
 +        // Paper start - Configurable player collision; Add to collideRule team if needed
 +        final net.minecraft.world.scores.Scoreboard scoreboard = this.getServer().getLevel(Level.OVERWORLD).getScoreboard();
@@ -220,6 +248,23 @@
 +            );
 +        }
 +        // Paper end - Send empty chunk
++    }
++
++    private static @Nullable Integer worldlineResumeEntityId(final Connection connection) {
++        if (!Boolean.getBoolean("worldline.resume")) {
++            return null;
++        }
++        final String marker = ".worldline-resume-";
++        final int start = connection.hostname.lastIndexOf(marker);
++        final int end = connection.hostname.indexOf(':', start + marker.length());
++        if (start < 0 || end < 0) {
++            return null;
++        }
++        try {
++            return Integer.valueOf(connection.hostname.substring(start + marker.length(), end));
++        } catch (NumberFormatException ignored) {
++            return null;
++        }
      }
  
      public void updateEntireScoreboard(final ServerScoreboard scoreboard, final ServerPlayer player) {

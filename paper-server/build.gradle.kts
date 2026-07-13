@@ -2,7 +2,6 @@ import io.papermc.fill.model.BuildChannel
 import io.papermc.paperweight.attribute.DevBundleOutput
 import io.papermc.paperweight.util.*
 import java.time.Instant
-import java.util.concurrent.TimeUnit
 
 plugins {
     `java-library`
@@ -299,51 +298,66 @@ val runServersJavaLauncher = javaToolchains.launcherFor {
     languageVersion.set(JavaLanguageVersion.of(25))
 }
 
-tasks.register("runServers") {
+tasks.register<Exec>("runServers") {
     group = "runs"
     description = "Spin up two test servers from the Mojang mapped server jar"
     dependsOn(tasks.jar)
     inputs.files(runServersClasspath)
+    standardInput = System.`in`
 
-    doLast {
+    doFirst {
         val memoryGb = providers.gradleProperty("paper.runMemoryGb").getOrElse("2")
         val runDir = rootProject.layout.projectDirectory
             .dir(providers.gradleProperty("paper.runWorkDir").getOrElse("run"))
             .asFile
-        // ponytail: fixed two-node dev topology; add configuration when another topology is needed.
-        val servers = listOf("server-a" to 25566, "server-b" to 25567)
-        val processes = servers.map { (name, port) ->
-            val workingDir = runDir.resolve(name).also(File::mkdirs)
-            logger.lifecycle("Starting $name on port $port in $workingDir")
-            ProcessBuilder(
-                runServersJavaLauncher.get().executablePath.asFile.absolutePath,
-                "-Xms${memoryGb}G",
-                "-Xmx${memoryGb}G",
-                "-Dnet.kyori.adventure.text.warnWhenLegacyFormattingDetected=true",
-                "-Dio.papermc.paper.suppress.sout.nags=true",
-                "-Dpaper.maxChatCommandInputSize=32767",
-                "-cp",
-                runServersClasspath.asPath,
-                "org.bukkit.craftbukkit.Main",
-                "--nogui",
-                "--port",
-                port.toString(),
-            )
-                .directory(workingDir)
-                .redirectOutput(ProcessBuilder.Redirect.INHERIT)
-                .redirectError(ProcessBuilder.Redirect.INHERIT)
-                .start()
-        }
+        runDir.resolve("server-a").mkdirs()
+        runDir.resolve("server-b").mkdirs()
+        // ponytail: this local two-node runner targets the Unix environments used for development.
+        commandLine(
+            "bash", "-c", """
+                set -e
+                java=${'$'}1
+                classpath=${'$'}2
+                memory=${'$'}3
+                run_dir=${'$'}4
+                pipe_a=${'$'}run_dir/.server-a.stdin
+                pipe_b=${'$'}run_dir/.server-b.stdin
+                rm -f "${'$'}pipe_a" "${'$'}pipe_b"
+                mkfifo "${'$'}pipe_a" "${'$'}pipe_b"
 
-        try {
-            while (processes.all(Process::isAlive)) {
-                Thread.sleep(250)
-            }
-        } finally {
-            processes.filter(Process::isAlive).forEach(Process::destroy)
-            processes.forEach { it.waitFor(5, TimeUnit.SECONDS) }
-            processes.filter(Process::isAlive).forEach(Process::destroyForcibly)
-        }
+                cleanup() {
+                    trap - EXIT INT TERM
+                    exec 3>&- 4>&- 5<&-
+                    kill ${'$'}input_pid ${'$'}server_a_pid ${'$'}server_b_pid 2>/dev/null || true
+                    wait ${'$'}input_pid 2>/dev/null || true
+                    wait ${'$'}server_a_pid ${'$'}server_b_pid 2>/dev/null || true
+                    rm -f "${'$'}pipe_a" "${'$'}pipe_b"
+                }
+                trap cleanup EXIT INT TERM
+
+                echo "Starting server-a on port 25566 in ${'$'}run_dir/server-a"
+                (cd "${'$'}run_dir/server-a" && "${'$'}java" "-Xms${'$'}{memory}G" "-Xmx${'$'}{memory}G" -Dnet.kyori.adventure.text.warnWhenLegacyFormattingDetected=true -Dio.papermc.paper.suppress.sout.nags=true -Dpaper.maxChatCommandInputSize=32767 -cp "${'$'}classpath" org.bukkit.craftbukkit.Main --nogui --port 25566 <"${'$'}pipe_a") &
+                server_a_pid=${'$'}!
+                echo "Starting server-b on port 25567 in ${'$'}run_dir/server-b"
+                (cd "${'$'}run_dir/server-b" && "${'$'}java" "-Xms${'$'}{memory}G" "-Xmx${'$'}{memory}G" -Dnet.kyori.adventure.text.warnWhenLegacyFormattingDetected=true -Dio.papermc.paper.suppress.sout.nags=true -Dpaper.maxChatCommandInputSize=32767 -cp "${'$'}classpath" org.bukkit.craftbukkit.Main --nogui --port 25567 <"${'$'}pipe_b") &
+                server_b_pid=${'$'}!
+
+                exec 3>"${'$'}pipe_a" 4>"${'$'}pipe_b" 5<&0
+                while IFS= read -r command; do
+                    printf '%s\n' "${'$'}command" >&3
+                    printf '%s\n' "${'$'}command" >&4
+                done <&5 &
+                input_pid=${'$'}!
+
+                wait ${'$'}server_a_pid
+                wait ${'$'}server_b_pid
+            """.trimIndent(),
+            "runServers",
+            runServersJavaLauncher.get().executablePath.asFile.absolutePath,
+            runServersClasspath.asPath,
+            memoryGb,
+            runDir.absolutePath,
+        )
     }
 }
 

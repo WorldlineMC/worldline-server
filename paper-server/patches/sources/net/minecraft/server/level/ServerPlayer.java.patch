@@ -577,6 +577,9 @@
          }
  
          Entity entity = source.getEntity();
++        if (io.papermc.paper.worldline.WorldlineControlServer.isFrozen(this.getUUID())) {
++            return false; // Worldline - frozen source players cannot receive authoritative damage
++        }
 -        return !(entity instanceof Player player && !this.canHarmPlayer(player))
 -            && !(entity instanceof AbstractArrow arrow && arrow.getOwner() instanceof Player owner && !this.canHarmPlayer(owner))
 -            && super.hurtServer(level, source, damage);
@@ -1688,4 +1691,43 @@
 +        return (org.bukkit.craftbukkit.entity.CraftPlayer) super.getBukkitEntity();
 +    }
 +    // CraftBukkit end
++
++    public net.minecraft.nbt.CompoundTag worldline$saveTransientState() {
++        final net.minecraft.nbt.CompoundTag state = new net.minecraft.nbt.CompoundTag();
++        state.putInt("AttackStrengthTicker", this.attackStrengthTicker);
++        state.putInt("ItemSwapTicker", this.itemSwapTicker);
++        state.putInt("InvulnerableTime", this.invulnerableTime);
++        state.putFloat("LastHurt", this.lastHurt);
++        state.putInt("BoardingCooldown", this.boardingCooldown);
++        state.putInt("JumpTriggerTime", this.jumpTriggerTime);
++        state.putInt("TakeXpDelay", this.takeXpDelay);
++        state.putBoolean("Swinging", this.swinging);
++        state.putInt("SwingTime", this.swingTime);
++        state.putString("SwingingArm", this.swingingArm == null ? "" : this.swingingArm.name());
++        state.putBoolean("Jumping", this.jumping);
++        state.putFloat("InputX", this.xxa);
++        state.putFloat("InputY", this.yya);
++        state.putFloat("InputZ", this.zza);
++        state.put("ItemCooldowns", this.getCooldowns().worldline$save());
++        return state;
++    }
++
++    public void worldline$loadTransientState(final net.minecraft.nbt.CompoundTag state) {
++        this.attackStrengthTicker = state.getIntOr("AttackStrengthTicker", 0);
++        this.itemSwapTicker = state.getIntOr("ItemSwapTicker", 0);
++        this.invulnerableTime = state.getIntOr("InvulnerableTime", 0);
++        this.lastHurt = state.getFloatOr("LastHurt", 0.0F);
++        this.boardingCooldown = state.getIntOr("BoardingCooldown", 0);
++        this.jumpTriggerTime = state.getIntOr("JumpTriggerTime", 0);
++        this.takeXpDelay = state.getIntOr("TakeXpDelay", 0);
++        this.swinging = state.getBooleanOr("Swinging", false);
++        this.swingTime = state.getIntOr("SwingTime", 0);
++        final String arm = state.getStringOr("SwingingArm", "");
++        this.swingingArm = arm.isEmpty() ? null : net.minecraft.world.InteractionHand.valueOf(arm);
++        this.jumping = state.getBooleanOr("Jumping", false);
++        this.xxa = state.getFloatOr("InputX", 0.0F);
++        this.yya = state.getFloatOr("InputY", 0.0F);
++        this.zza = state.getFloatOr("InputZ", 0.0F);
++        this.getCooldowns().worldline$load(state.getCompound("ItemCooldowns").orElseThrow());
++    }
  }

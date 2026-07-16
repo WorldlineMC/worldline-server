@@ -1,6 +1,8 @@
 package io.papermc.paper.worldline;
 
 import com.mojang.authlib.GameProfile;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
@@ -19,6 +21,10 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.Callable;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtAccounter;
+import net.minecraft.nbt.NbtIo;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
@@ -31,25 +37,31 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.util.Mth;
 import net.minecraft.util.StringUtil;
+import net.minecraft.util.ProblemReporter;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.storage.TagValueInput;
+import net.minecraft.world.level.storage.TagValueOutput;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/** Slice-only TCP endpoint for the M2/M3 handoff control plane. */
+/** Slice-only TCP endpoint for the M2-M4 handoff control plane. */
 public final class WorldlineControlServer {
     private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl");
     private static final int MAGIC = 0x574c4d32;
-    private static final int PROTOCOL_VERSION = 2;
+    private static final int PROTOCOL_VERSION = 3;
+    private static final int SNAPSHOT_SCHEMA_VERSION = 1;
+    private static final int MAX_PAYLOAD_BYTES = 1_048_576;
     private static final long PREPARE_TIMEOUT_MILLIS = 1_500;
     private static final Set<String> SOURCE_COMMANDS = Set.of(
-        "CHECK_PREPARE", "FREEZE_SOURCE", "CLEAN_SOURCE"
+        "CHECK_PREPARE", "FREEZE_SOURCE", "ABORT_SOURCE", "CLEAN_SOURCE"
     );
     private static final Set<String> DESTINATION_COMMANDS = Set.of(
         "PREPARE", "ABORT", "STAGE_SNAPSHOT", "COMMIT", "ACTIVATE_DESTINATION"
     );
     private static final AtomicBoolean STARTED = new AtomicBoolean();
     private static final Map<UUID, Preparation> PREPARATIONS = new ConcurrentHashMap<>();
+    private static final Map<UUID, FrozenPlayer> FROZEN_PLAYERS = new ConcurrentHashMap<>();
 
     private WorldlineControlServer() {
     }
@@ -118,6 +130,14 @@ public final class WorldlineControlServer {
         final long playerSessionEpoch = input.readLong();
         final long playerStateVersion = input.readLong();
         final PrepareTarget target = input.readBoolean() ? readTarget(input) : null;
+        final int payloadLength = input.readInt();
+        if (payloadLength < 0 || payloadLength > MAX_PAYLOAD_BYTES) {
+            throw new IOException("invalid payload length");
+        }
+        final byte[] payload = input.readNBytes(payloadLength);
+        if (payload.length != payloadLength) {
+            throw new IOException("truncated payload");
+        }
 
         final boolean sourceCommand = SOURCE_COMMANDS.contains(command);
         final boolean knownCommand = sourceCommand || DESTINATION_COMMANDS.contains(command);
@@ -139,6 +159,17 @@ public final class WorldlineControlServer {
             }
         } else if (command.equals("ABORT")) {
             result = discardPreparation(playerId, transferId);
+        } else if (command.equals("FREEZE_SOURCE")) {
+            result = freezeSource(transferId, playerId, sourceServerId, destinationServerId,
+                sourcePartitionId, sourcePartitionEpoch, destinationPartitionId,
+                destinationPartitionEpoch, playerSessionEpoch, playerStateVersion);
+        } else if (command.equals("ABORT_SOURCE")) {
+            result = unfreezeSource(playerId, transferId);
+        } else if (command.equals("STAGE_SNAPSHOT")) {
+            result = stageSnapshot(payload, transferId, playerId, sourceServerId,
+                destinationServerId, sourcePartitionId, sourcePartitionEpoch,
+                destinationPartitionId, destinationPartitionEpoch, playerSessionEpoch,
+                playerStateVersion);
         } else {
             result = CommandResult.accepted("accepted");
         }
@@ -148,6 +179,8 @@ public final class WorldlineControlServer {
         output.writeInt(PROTOCOL_VERSION);
         output.writeBoolean(result.accepted());
         output.writeUTF(result.detail());
+        output.writeInt(result.payload().length);
+        output.write(result.payload());
         output.writeInt(protocolVersion);
         writeUuid(output, transferId);
         writeUuid(output, playerId);
@@ -165,6 +198,261 @@ public final class WorldlineControlServer {
         output.flush();
         LOGGER.info("Worldline control command={} transfer={} accepted={} detail={}",
             command, transferId, result.accepted(), result.detail());
+    }
+
+    /** Used by the entity tick and damage paths to suppress frozen source simulation. */
+    public static boolean isFrozen(final UUID playerId) {
+        return FROZEN_PLAYERS.containsKey(playerId);
+    }
+
+    private static CommandResult freezeSource(final UUID transferId, final UUID playerId,
+                                              final String sourceServerId,
+                                              final String destinationServerId,
+                                              final String sourcePartitionId,
+                                              final long sourcePartitionEpoch,
+                                              final String destinationPartitionId,
+                                              final long destinationPartitionEpoch,
+                                              final long playerSessionEpoch,
+                                              final long playerStateVersion) {
+        if (playerStateVersion < 1) {
+            return CommandResult.rejected("player state version must be positive");
+        }
+        return onServerThread(() -> {
+            final FrozenPlayer existing = FROZEN_PLAYERS.get(playerId);
+            if (existing != null) {
+                return existing.matches(transferId, playerSessionEpoch, playerStateVersion)
+                    ? CommandResult.accepted("already frozen", existing.snapshot)
+                    : CommandResult.rejected("player is frozen by another transfer");
+            }
+            final MinecraftServer server = MinecraftServer.getServer();
+            final ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+            final String unsupported = unsupportedState(player);
+            if (unsupported != null) {
+                return CommandResult.rejected(unsupported);
+            }
+            FROZEN_PLAYERS.put(playerId, new FrozenPlayer(transferId, playerSessionEpoch,
+                playerStateVersion, new byte[0]));
+            try {
+                final byte[] snapshot = encodeSnapshot(player, server.getTickCount(), transferId,
+                    sourceServerId, destinationServerId, sourcePartitionId,
+                    sourcePartitionEpoch, destinationPartitionId, destinationPartitionEpoch,
+                    playerSessionEpoch, playerStateVersion);
+                FROZEN_PLAYERS.put(playerId, new FrozenPlayer(transferId, playerSessionEpoch,
+                    playerStateVersion, snapshot));
+                LOGGER.info("Worldline froze source player={} transfer={} tick={} "
+                        + "player_state_version={} snapshot_bytes={}", playerId, transferId,
+                    server.getTickCount(), playerStateVersion, snapshot.length);
+                return CommandResult.accepted("source frozen", snapshot);
+            } catch (IOException | RuntimeException e) {
+                FROZEN_PLAYERS.remove(playerId);
+                return CommandResult.rejected("snapshot failed: " + e.getMessage());
+            }
+        });
+    }
+
+    private static CommandResult unfreezeSource(final UUID playerId, final UUID transferId) {
+        return onServerThread(() -> {
+            final FrozenPlayer frozen = FROZEN_PLAYERS.get(playerId);
+            if (frozen == null) {
+                return CommandResult.accepted("already active");
+            }
+            if (!frozen.transferId.equals(transferId)) {
+                return CommandResult.rejected("different transfer froze source");
+            }
+            FROZEN_PLAYERS.remove(playerId, frozen);
+            LOGGER.info("Worldline unfroze source player={} transfer={}", playerId, transferId);
+            return CommandResult.accepted("source active");
+        });
+    }
+
+    private static CommandResult stageSnapshot(final byte[] payload, final UUID transferId,
+                                               final UUID playerId,
+                                               final String sourceServerId,
+                                               final String destinationServerId,
+                                               final String sourcePartitionId,
+                                               final long sourcePartitionEpoch,
+                                               final String destinationPartitionId,
+                                               final long destinationPartitionEpoch,
+                                               final long playerSessionEpoch,
+                                               final long playerStateVersion) {
+        if (payload.length == 0) {
+            return CommandResult.rejected("snapshot missing");
+        }
+        return onServerThread(() -> {
+            final Preparation preparation = PREPARATIONS.get(playerId);
+            if (preparation == null || !preparation.transferId.equals(transferId)
+                || preparation.playerSessionEpoch != playerSessionEpoch
+                || preparation.player == null || preparation.cancelled) {
+                return CommandResult.rejected("matching destination preparation missing");
+            }
+            if (preparation.stagedSnapshot != null) {
+                return java.util.Arrays.equals(preparation.stagedSnapshot, payload)
+                    ? CommandResult.accepted("already staged")
+                    : CommandResult.rejected("different snapshot already staged");
+            }
+            try {
+                final CompoundTag root = decodeSnapshot(payload);
+                final String mismatch = validateSnapshot(root, transferId, playerId,
+                    sourceServerId, destinationServerId, sourcePartitionId,
+                    sourcePartitionEpoch, destinationPartitionId,
+                    destinationPartitionEpoch, playerSessionEpoch, playerStateVersion);
+                if (mismatch != null) {
+                    return CommandResult.rejected(mismatch);
+                }
+                if (!isByteExactSnapshotEncoding(payload)) {
+                    return CommandResult.rejected("snapshot is not byte-exact on reserialization");
+                }
+                final CompoundTag playerTag = root.getCompound("Player").orElseThrow();
+                final CompoundTag transientState = root.getCompound("Transient").orElseThrow();
+                preparation.player.load(TagValueInput.create(ProblemReporter.DISCARDING,
+                    preparation.level.registryAccess(), playerTag));
+                preparation.player.worldline$loadTransientState(transientState);
+                final TagValueOutput staged = TagValueOutput.createWithContext(
+                    ProblemReporter.DISCARDING, preparation.player.registryAccess());
+                preparation.player.saveWithoutId(staged);
+                if (!playerTag.equals(staged.buildResult())) {
+                    return CommandResult.rejected("prepared player cannot reproduce snapshot exactly");
+                }
+                if (!transientState.equals(preparation.player.worldline$saveTransientState())) {
+                    return CommandResult.rejected("prepared player cannot reproduce transient state exactly");
+                }
+                preparation.stagedSnapshot = payload.clone();
+                LOGGER.info("Worldline staged exact snapshot player={} transfer={} "
+                        + "player_state_version={} snapshot_bytes={}", playerId, transferId,
+                    playerStateVersion, payload.length);
+                return CommandResult.accepted("snapshot staged");
+            } catch (IOException | RuntimeException e) {
+                return CommandResult.rejected("invalid snapshot: " + e.getMessage());
+            }
+        });
+    }
+
+    private static String unsupportedState(final ServerPlayer player) {
+        if (player == null || !player.isAlive()) {
+            return "active source player missing";
+        }
+        if (player.isPassenger() || player.isVehicle()) {
+            return "vehicle or passenger state is unsupported";
+        }
+        if (player.containerMenu != player.inventoryMenu) {
+            return "open container state is unsupported";
+        }
+        if (player.isSleeping()) {
+            return "sleeping state is unsupported";
+        }
+        if (player.portalProcess != null) {
+            return "active portal state is unsupported";
+        }
+        if (player.getCamera() != player) {
+            return "remote camera state is unsupported";
+        }
+        if (player.connection == null || !player.connection.worldline$canFreeze()) {
+            return "pending protocol synchronization state is unsupported";
+        }
+        return null;
+    }
+
+    private static byte[] encodeSnapshot(final ServerPlayer player, final long sourceTick,
+                                         final UUID transferId, final String sourceServerId,
+                                         final String destinationServerId,
+                                         final String sourcePartitionId,
+                                         final long sourcePartitionEpoch,
+                                         final String destinationPartitionId,
+                                         final long destinationPartitionEpoch,
+                                         final long playerSessionEpoch,
+                                         final long playerStateVersion) throws IOException {
+        final TagValueOutput playerOutput = TagValueOutput.createWithContext(
+            ProblemReporter.DISCARDING, player.registryAccess());
+        player.saveWithoutId(playerOutput);
+        final CompoundTag root = new CompoundTag();
+        root.putInt("SnapshotSchemaVersion", SNAPSHOT_SCHEMA_VERSION);
+        root.putLong("SourceTick", sourceTick);
+        root.putLong("PlayerStateVersion", playerStateVersion);
+        root.putLong("PlayerSessionEpoch", playerSessionEpoch);
+        root.putString("TransferId", transferId.toString());
+        root.putString("PlayerUuid", player.getUUID().toString());
+        root.putString("SourceServerId", sourceServerId);
+        root.putString("DestinationServerId", destinationServerId);
+        root.putString("SourcePartitionId", sourcePartitionId);
+        root.putLong("SourcePartitionEpoch", sourcePartitionEpoch);
+        root.putString("DestinationPartitionId", destinationPartitionId);
+        root.putLong("DestinationPartitionEpoch", destinationPartitionEpoch);
+        root.put("Player", playerOutput.buildResult());
+        root.put("Transient", player.worldline$saveTransientState());
+        final byte[] bytes = writeNbt(root);
+        if (bytes.length > MAX_PAYLOAD_BYTES) {
+            throw new IOException("snapshot exceeds " + MAX_PAYLOAD_BYTES + " bytes");
+        }
+        return bytes;
+    }
+
+    private static CompoundTag decodeSnapshot(final byte[] payload) throws IOException {
+        try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(payload))) {
+            return NbtIo.read(input, NbtAccounter.create(MAX_PAYLOAD_BYTES * 4L));
+        }
+    }
+
+    private static byte[] writeNbt(final CompoundTag root) throws IOException {
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (DataOutputStream output = new DataOutputStream(bytes)) {
+            NbtIo.write(root, output);
+        }
+        return bytes.toByteArray();
+    }
+
+    static boolean isByteExactSnapshotEncoding(final byte[] payload) throws IOException {
+        return java.util.Arrays.equals(payload, writeNbt(decodeSnapshot(payload)));
+    }
+
+    private static String validateSnapshot(final CompoundTag root, final UUID transferId,
+                                           final UUID playerId, final String sourceServerId,
+                                           final String destinationServerId,
+                                           final String sourcePartitionId,
+                                           final long sourcePartitionEpoch,
+                                           final String destinationPartitionId,
+                                           final long destinationPartitionEpoch,
+                                           final long playerSessionEpoch,
+                                           final long playerStateVersion) {
+        if (root.getIntOr("SnapshotSchemaVersion", -1) != SNAPSHOT_SCHEMA_VERSION
+            || root.getLongOr("PlayerStateVersion", -1) != playerStateVersion
+            || root.getLongOr("PlayerSessionEpoch", -1) != playerSessionEpoch
+            || !root.getStringOr("TransferId", "").equals(transferId.toString())
+            || !root.getStringOr("PlayerUuid", "").equals(playerId.toString())
+            || !root.getStringOr("SourceServerId", "").equals(sourceServerId)
+            || !root.getStringOr("DestinationServerId", "").equals(destinationServerId)
+            || !root.getStringOr("SourcePartitionId", "").equals(sourcePartitionId)
+            || root.getLongOr("SourcePartitionEpoch", -1) != sourcePartitionEpoch
+            || !root.getStringOr("DestinationPartitionId", "").equals(destinationPartitionId)
+            || root.getLongOr("DestinationPartitionEpoch", -1) != destinationPartitionEpoch
+            || root.getLongOr("SourceTick", -1) < 0 || root.getCompound("Player").isEmpty()
+            || root.getCompound("Transient").isEmpty()) {
+            return "snapshot metadata fence rejected";
+        }
+        return null;
+    }
+
+    private static CommandResult onServerThread(final Callable<CommandResult> operation) {
+        final MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || server.isStopped()) {
+            return CommandResult.rejected("server is not active");
+        }
+        final CompletableFuture<CommandResult> result = new CompletableFuture<>();
+        try {
+            server.execute(() -> {
+                try {
+                    result.complete(operation.call());
+                } catch (Exception e) {
+                    result.complete(CommandResult.rejected("server operation failed: "
+                        + e.getMessage()));
+                }
+            });
+            return result.get(1_000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return CommandResult.rejected("server operation interrupted");
+        } catch (ExecutionException | TimeoutException | RuntimeException e) {
+            return CommandResult.rejected("server operation timed out");
+        }
     }
 
     private static CommandResult checkReady(final PrepareTarget target,
@@ -376,13 +664,27 @@ public final class WorldlineControlServer {
         }
     }
 
-    private record CommandResult(boolean accepted, String detail) {
+    private record CommandResult(boolean accepted, String detail, byte[] payload) {
         private static CommandResult accepted(final String detail) {
-            return new CommandResult(true, detail);
+            return accepted(detail, new byte[0]);
+        }
+
+        private static CommandResult accepted(final String detail, final byte[] payload) {
+            return new CommandResult(true, detail, payload);
         }
 
         private static CommandResult rejected(final String detail) {
-            return new CommandResult(false, detail);
+            return new CommandResult(false, detail, new byte[0]);
+        }
+    }
+
+    private record FrozenPlayer(UUID transferId, long playerSessionEpoch,
+                                long playerStateVersion, byte[] snapshot) {
+        private boolean matches(final UUID transferId, final long playerSessionEpoch,
+                                final long playerStateVersion) {
+            return this.transferId.equals(transferId)
+                && this.playerSessionEpoch == playerSessionEpoch
+                && this.playerStateVersion == playerStateVersion;
         }
     }
 
@@ -399,6 +701,7 @@ public final class WorldlineControlServer {
         private int ticketLevel;
         private boolean ticketAdded;
         private ServerPlayer player;
+        private byte[] stagedSnapshot;
 
         private Preparation(final UUID transferId, final UUID playerId,
                             final long playerSessionEpoch, final PrepareTarget target) {

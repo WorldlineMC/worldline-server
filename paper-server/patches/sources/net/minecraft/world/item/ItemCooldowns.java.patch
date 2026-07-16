@@ -14,8 +14,42 @@
          this.cooldowns.put(cooldownGroup, new ItemCooldowns.CooldownInstance(this.tickCount, this.tickCount + time));
          this.onCooldownStarted(cooldownGroup, time);
      }
-@@ -73,4 +_,14 @@
+@@ -71,6 +_,48 @@
+     protected void onCooldownEnded(final Identifier cooldownGroup) {
+     }
  
++    public net.minecraft.nbt.CompoundTag worldline$save() {
++        final net.minecraft.nbt.CompoundTag root = new net.minecraft.nbt.CompoundTag();
++        root.putInt("TickCount", this.tickCount);
++        final net.minecraft.nbt.ListTag entries = new net.minecraft.nbt.ListTag();
++        for (final Map.Entry<Identifier, ItemCooldowns.CooldownInstance> entry : this.cooldowns.entrySet()) {
++            final net.minecraft.nbt.CompoundTag value = new net.minecraft.nbt.CompoundTag();
++            value.putString("Group", entry.getKey().toString());
++            value.putInt("Start", entry.getValue().startTime());
++            value.putInt("End", entry.getValue().endTime());
++            entries.add(value);
++        }
++        root.put("Entries", entries);
++        return root;
++    }
++
++    public void worldline$load(final net.minecraft.nbt.CompoundTag root) {
++        this.tickCount = root.getIntOr("TickCount", 0);
++        this.cooldowns.clear();
++        for (final net.minecraft.nbt.Tag raw : root.getListOrEmpty("Entries")) {
++            if (!(raw instanceof net.minecraft.nbt.CompoundTag value)) {
++                throw new IllegalArgumentException("invalid cooldown entry");
++            }
++            final Identifier group = Identifier.parse(value.getStringOr("Group", ""));
++            final int start = value.getIntOr("Start", 0);
++            final int end = value.getIntOr("End", 0);
++            if (end < start || end < this.tickCount) {
++                throw new IllegalArgumentException("invalid cooldown range");
++            }
++            this.cooldowns.put(group, new ItemCooldowns.CooldownInstance(start, end));
++        }
++    }
++
      private record CooldownInstance(int startTime, int endTime) {
      }
 +

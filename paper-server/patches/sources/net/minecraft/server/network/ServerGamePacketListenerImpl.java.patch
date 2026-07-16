@@ -2696,4 +2696,12 @@
 +        return this.playerGameConnection;
 +    }
 +    // Paper end
++
++    public boolean worldline$canFreeze() {
++        return this.awaitingPositionFromClient == null
++            && this.ackBlockChangesUpTo == -1
++            && !this.waitingForSwitchToConfig
++            && !this.waitingForRespawn
++            && this.clientLoadedTimeoutTimer <= 0;
++    }
  }

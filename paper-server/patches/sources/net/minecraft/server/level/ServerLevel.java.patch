@@ -543,6 +543,10 @@
 +                currentlyTickingEntity.lazySet(entity);
 +            }
 +            // Paper end - log detailed entity tick information
++        if (entity instanceof ServerPlayer player
++            && io.papermc.paper.worldline.WorldlineControlServer.isFrozen(player.getUUID())) {
++            return; // Worldline - source authority is frozen while connection traffic continues
++        }
          entity.setOldPosAndRot();
          ProfilerFiller profiler = Profiler.get();
          entity.tickCount++;

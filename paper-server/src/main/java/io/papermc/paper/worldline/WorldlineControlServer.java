@@ -14,6 +14,7 @@ import java.net.Socket;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -307,8 +308,12 @@ public final class WorldlineControlServer {
                 final TagValueOutput staged = TagValueOutput.createWithContext(
                     ProblemReporter.DISCARDING, preparation.player.registryAccess());
                 preparation.player.saveWithoutId(staged);
-                if (!playerTag.equals(staged.buildResult())) {
-                    return CommandResult.rejected("prepared player cannot reproduce snapshot exactly");
+                final CompoundTag reproducedPlayerTag = staged.buildResult();
+                final CompoundTag expectedState = comparablePlayerState(playerTag);
+                final CompoundTag reproducedState = comparablePlayerState(reproducedPlayerTag);
+                if (!expectedState.equals(reproducedState)) {
+                    return CommandResult.rejected("prepared player cannot reproduce snapshot exactly; "
+                        + "differing keys=" + differingKeys(expectedState, reproducedState));
                 }
                 if (!transientState.equals(preparation.player.worldline$saveTransientState())) {
                     return CommandResult.rejected("prepared player cannot reproduce transient state exactly");
@@ -399,6 +404,34 @@ public final class WorldlineControlServer {
             NbtIo.write(root, output);
         }
         return bytes.toByteArray();
+    }
+
+    static String differingKeys(final CompoundTag expected, final CompoundTag actual) {
+        final Set<String> keys = new TreeSet<>(expected.keySet());
+        keys.addAll(actual.keySet());
+        final StringBuilder differences = new StringBuilder();
+        for (final String key : keys) {
+            if (Objects.equals(expected.get(key), actual.get(key))) {
+                continue;
+            }
+            if (!differences.isEmpty()) {
+                differences.append(',');
+            }
+            differences.append(key);
+        }
+        return differences.toString();
+    }
+
+    static CompoundTag comparablePlayerState(final CompoundTag playerTag) {
+        final CompoundTag state = playerTag.copy();
+        state.remove("WorldUUIDLeast");
+        state.remove("WorldUUIDMost");
+        state.getCompound("bukkit").ifPresent(bukkit -> bukkit.remove("lastPlayed"));
+        state.getCompound("Paper").ifPresent(paper -> {
+            paper.remove("LastLogin");
+            paper.remove("LastSeen");
+        });
+        return state;
     }
 
     private static String validateSnapshot(final CompoundTag root, final UUID transferId,

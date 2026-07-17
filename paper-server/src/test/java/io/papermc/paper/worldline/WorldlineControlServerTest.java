@@ -2,6 +2,7 @@ package io.papermc.paper.worldline;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.ByteArrayOutputStream;
@@ -35,6 +36,49 @@ public class WorldlineControlServerTest {
         byte[] withTrailingData = Arrays.copyOf(bytes.toByteArray(), bytes.size() + 1);
         assertThrows(IOException.class,
             () -> WorldlineControlServer.decodeSnapshot(withTrailingData));
+    }
+
+    @Test
+    void snapshotDifferenceReportsOnlyChangedKeysInStableOrder() {
+        CompoundTag expected = new CompoundTag();
+        expected.putInt("Health", 20);
+        expected.putInt("FoodLevel", 18);
+        CompoundTag actual = new CompoundTag();
+        actual.putInt("Health", 19);
+        actual.putInt("XpLevel", 4);
+
+        assertEquals("FoodLevel,Health,XpLevel",
+            WorldlineControlServer.differingKeys(expected, actual));
+    }
+
+    @Test
+    void snapshotComparisonIgnoresOnlyStorageLocalAndSaveTimeMetadata() {
+        CompoundTag source = new CompoundTag();
+        source.putLong("WorldUUIDLeast", 1);
+        source.putLong("WorldUUIDMost", 2);
+        source.putFloat("Health", 17.5F);
+        CompoundTag sourceBukkit = new CompoundTag();
+        sourceBukkit.putLong("lastPlayed", 10);
+        sourceBukkit.putLong("firstPlayed", 5);
+        source.put("bukkit", sourceBukkit);
+        CompoundTag sourcePaper = new CompoundTag();
+        sourcePaper.putLong("LastLogin", 8);
+        sourcePaper.putLong("LastSeen", 10);
+        source.put("Paper", sourcePaper);
+
+        CompoundTag destination = source.copy();
+        destination.putLong("WorldUUIDLeast", 3);
+        destination.putLong("WorldUUIDMost", 4);
+        destination.getCompound("bukkit").orElseThrow().putLong("lastPlayed", 20);
+        destination.getCompound("Paper").orElseThrow().putLong("LastLogin", 18);
+        destination.getCompound("Paper").orElseThrow().putLong("LastSeen", 20);
+
+        assertEquals(WorldlineControlServer.comparablePlayerState(source),
+            WorldlineControlServer.comparablePlayerState(destination));
+
+        destination.putFloat("Health", 16.5F);
+        assertNotEquals(WorldlineControlServer.comparablePlayerState(source),
+            WorldlineControlServer.comparablePlayerState(destination));
     }
 
     @Test

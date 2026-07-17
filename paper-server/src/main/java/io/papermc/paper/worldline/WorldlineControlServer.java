@@ -299,9 +299,6 @@ public final class WorldlineControlServer {
                 if (mismatch != null) {
                     return CommandResult.rejected(mismatch);
                 }
-                if (!isByteExactSnapshotEncoding(payload)) {
-                    return CommandResult.rejected("snapshot is not byte-exact on reserialization");
-                }
                 final CompoundTag playerTag = root.getCompound("Player").orElseThrow();
                 final CompoundTag transientState = root.getCompound("Transient").orElseThrow();
                 preparation.player.load(TagValueInput.create(ProblemReporter.DISCARDING,
@@ -379,16 +376,20 @@ public final class WorldlineControlServer {
         root.putLong("DestinationPartitionEpoch", destinationPartitionEpoch);
         root.put("Player", playerOutput.buildResult());
         root.put("Transient", player.worldline$saveTransientState());
-        final byte[] bytes = canonicalSnapshotEncoding(root);
+        final byte[] bytes = writeNbt(root);
         if (bytes.length > MAX_PAYLOAD_BYTES) {
             throw new IOException("snapshot exceeds " + MAX_PAYLOAD_BYTES + " bytes");
         }
         return bytes;
     }
 
-    private static CompoundTag decodeSnapshot(final byte[] payload) throws IOException {
+    static CompoundTag decodeSnapshot(final byte[] payload) throws IOException {
         try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(payload))) {
-            return NbtIo.read(input, NbtAccounter.create(MAX_PAYLOAD_BYTES * 4L));
+            final CompoundTag root = NbtIo.read(input, NbtAccounter.create(MAX_PAYLOAD_BYTES * 4L));
+            if (input.available() != 0) {
+                throw new IOException("snapshot has trailing data");
+            }
+            return root;
         }
     }
 
@@ -398,14 +399,6 @@ public final class WorldlineControlServer {
             NbtIo.write(root, output);
         }
         return bytes.toByteArray();
-    }
-
-    static byte[] canonicalSnapshotEncoding(final CompoundTag root) throws IOException {
-        return writeNbt(decodeSnapshot(writeNbt(root)));
-    }
-
-    static boolean isByteExactSnapshotEncoding(final byte[] payload) throws IOException {
-        return java.util.Arrays.equals(payload, writeNbt(decodeSnapshot(payload)));
     }
 
     private static String validateSnapshot(final CompoundTag root, final UUID transferId,

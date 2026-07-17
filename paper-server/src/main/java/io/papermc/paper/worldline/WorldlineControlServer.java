@@ -379,7 +379,7 @@ public final class WorldlineControlServer {
         root.putLong("DestinationPartitionEpoch", destinationPartitionEpoch);
         root.put("Player", playerOutput.buildResult());
         root.put("Transient", player.worldline$saveTransientState());
-        final byte[] bytes = writeNbt(root);
+        final byte[] bytes = canonicalSnapshotEncoding(root);
         if (bytes.length > MAX_PAYLOAD_BYTES) {
             throw new IOException("snapshot exceeds " + MAX_PAYLOAD_BYTES + " bytes");
         }
@@ -398,6 +398,10 @@ public final class WorldlineControlServer {
             NbtIo.write(root, output);
         }
         return bytes.toByteArray();
+    }
+
+    static byte[] canonicalSnapshotEncoding(final CompoundTag root) throws IOException {
+        return writeNbt(decodeSnapshot(writeNbt(root)));
     }
 
     static boolean isByteExactSnapshotEncoding(final byte[] payload) throws IOException {

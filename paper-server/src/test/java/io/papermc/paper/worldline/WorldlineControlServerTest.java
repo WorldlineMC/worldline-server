@@ -4,11 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
 import java.util.Arrays;
 import net.minecraft.nbt.CompoundTag;
-import net.minecraft.nbt.NbtIo;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.item.ItemCooldowns;
 import org.bukkit.support.environment.Normal;
@@ -27,11 +24,10 @@ public class WorldlineControlServerTest {
         snapshot.putLong("PlayerStateVersion", 7);
         snapshot.put("Player", player);
 
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        NbtIo.write(snapshot, new DataOutputStream(bytes));
+        byte[] bytes = WorldlineControlServer.canonicalSnapshotEncoding(snapshot);
 
-        assertTrue(WorldlineControlServer.isByteExactSnapshotEncoding(bytes.toByteArray()));
-        byte[] withTrailingData = Arrays.copyOf(bytes.toByteArray(), bytes.size() + 1);
+        assertTrue(WorldlineControlServer.isByteExactSnapshotEncoding(bytes));
+        byte[] withTrailingData = Arrays.copyOf(bytes, bytes.length + 1);
         assertFalse(WorldlineControlServer.isByteExactSnapshotEncoding(withTrailingData));
     }
 

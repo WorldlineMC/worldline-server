@@ -2,13 +2,21 @@ package io.papermc.paper.worldline;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Socket;
 import java.util.Arrays;
+import java.util.UUID;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.resources.Identifier;
@@ -18,6 +26,86 @@ import org.junit.jupiter.api.Test;
 
 @Normal
 public class WorldlineControlServerTest {
+    private static final int MAGIC = 0x574c4d32;
+
+    @Test
+    void protocolV4HasOnlyExplicitCommitAndCleanupCommands() {
+        assertEquals(4, WorldlineControlServer.protocolVersionForTesting());
+        assertFalse(WorldlineControlServer.isKnownCommandForTesting("COMMIT"));
+        assertTrue(WorldlineControlServer.isKnownCommandForTesting("COMMIT_DESTINATION"));
+        assertTrue(WorldlineControlServer.isKnownCommandForTesting("COMMIT_SOURCE"));
+        assertTrue(WorldlineControlServer.isKnownCommandForTesting("ACTIVATE_DESTINATION"));
+        assertTrue(WorldlineControlServer.isKnownCommandForTesting("CLEAN_SOURCE"));
+        assertTrue(WorldlineControlServer.isKnownCommandForTesting("RETIRE_DESTINATION"));
+    }
+
+    @Test
+    void v4ResponseEchoesEveryFenceFieldInProxyOrder() throws Exception {
+        UUID transferId = UUID.fromString("00000000-0000-0000-0000-000000000071");
+        UUID playerId = UUID.fromString("00000000-0000-0000-0000-000000000072");
+        UUID clientId = UUID.fromString("00000000-0000-0000-0000-000000000073");
+        ByteArrayOutputStream requestBytes = new ByteArrayOutputStream();
+        try (DataOutputStream request = new DataOutputStream(requestBytes)) {
+            request.writeInt(MAGIC);
+            request.writeInt(4);
+            request.writeUTF("UNKNOWN");
+            writeUuid(request, transferId);
+            writeUuid(request, playerId);
+            writeUuid(request, clientId);
+            request.writeUTF("server-a");
+            request.writeUTF("server-b");
+            request.writeUTF("west");
+            request.writeLong(11);
+            request.writeUTF("east");
+            request.writeLong(12);
+            request.writeLong(13);
+            request.writeLong(14);
+            request.writeLong(15);
+            request.writeBoolean(false);
+            request.writeInt(0);
+        }
+        MemorySocket socket = new MemorySocket(requestBytes.toByteArray());
+
+        WorldlineControlServer.handle(socket, "server-a", "west", 11, "compatible");
+
+        try (DataInputStream response = new DataInputStream(
+            new ByteArrayInputStream(socket.response()))) {
+            assertEquals(MAGIC, response.readInt());
+            assertEquals(4, response.readInt());
+            assertFalse(response.readBoolean());
+            assertEquals("identity, protocol, or ownership fence rejected", response.readUTF());
+            assertEquals(0, response.readInt());
+            assertEquals(4, response.readInt());
+            assertEquals(transferId, readUuid(response));
+            assertEquals(playerId, readUuid(response));
+            assertEquals(clientId, readUuid(response));
+            assertEquals("server-a", response.readUTF());
+            assertEquals("server-b", response.readUTF());
+            assertEquals("west", response.readUTF());
+            assertEquals("east", response.readUTF());
+            assertEquals(11, response.readLong());
+            assertEquals(12, response.readLong());
+            assertEquals(13, response.readLong());
+            assertEquals(14, response.readLong());
+            assertEquals(15, response.readLong());
+            assertEquals("server-a", response.readUTF());
+            assertEquals("west", response.readUTF());
+            assertEquals(11, response.readLong());
+            assertEquals(0, response.available());
+        }
+    }
+
+    @Test
+    void v3IsRejectedBeforeReadingOrDispatchingACommand() throws Exception {
+        ByteArrayOutputStream requestBytes = new ByteArrayOutputStream();
+        try (DataOutputStream request = new DataOutputStream(requestBytes)) {
+            request.writeInt(MAGIC);
+            request.writeInt(3);
+        }
+
+        assertThrows(IOException.class, () -> WorldlineControlServer.handle(
+            new MemorySocket(requestBytes.toByteArray()), "server-a", "west", 11, "compatible"));
+    }
 
     @Test
     void snapshotNbtRejectsTrailingData() throws Exception {
@@ -95,5 +183,38 @@ public class WorldlineControlServerTest {
 
         assertEquals(8, staged.getRemainingCooldown(group));
         assertEquals(snapshot, staged.worldline$save());
+    }
+
+    private static void writeUuid(final DataOutputStream output, final UUID value)
+        throws IOException {
+        output.writeLong(value.getMostSignificantBits());
+        output.writeLong(value.getLeastSignificantBits());
+    }
+
+    private static UUID readUuid(final DataInputStream input) throws IOException {
+        return new UUID(input.readLong(), input.readLong());
+    }
+
+    private static final class MemorySocket extends Socket {
+        private final ByteArrayInputStream request;
+        private final ByteArrayOutputStream response = new ByteArrayOutputStream();
+
+        private MemorySocket(final byte[] request) {
+            this.request = new ByteArrayInputStream(request);
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return this.request;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return this.response;
+        }
+
+        private byte[] response() {
+            return this.response.toByteArray();
+        }
     }
 }

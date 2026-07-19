@@ -42,7 +42,7 @@ index c8a65d411ccb8a0ef1dad2da8e8f95e8ce4e36a5..a79b74beb7a21dccf667eb0dea050633
      protected ChunkGenerator generator() {
          return this.worldGenContext.generator();
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index 3d6765f284d1817d68db4d9ae0d90c7e73e6e068..a7ef3915dca196e6c5afac43dff99c870f4dee2a 100644
+index 550b915d4ed457231605247c3e21844fed2f67b6..6ff4f973fbac35a2f3a62c633de8b55b091e0923 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -535,9 +535,18 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
@@ -77,10 +77,10 @@ index 3d6765f284d1817d68db4d9ae0d90c7e73e6e068..a7ef3915dca196e6c5afac43dff99c87
              profiler.popPush("tickSpawningChunks");
  
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 5470cf001a6914369359cac4921fc5e216b0117b..2e261e411bee7777008696d992c2e30cf5ca0c5e 100644
+index 05d3707c7d4d40a5bf3fe20a01ef7d6e8ebbbd05..5316a84a875b3991c861c76c4bb0392aef8f2d99 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -417,6 +417,10 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -419,6 +419,10 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
      public boolean queueHealthUpdatePacket;
      public net.minecraft.network.protocol.game.@Nullable ClientboundSetHealthPacket queuedHealthUpdatePacket;
      // Paper end - cancellable death event

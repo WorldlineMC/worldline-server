@@ -11,6 +11,9 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -27,6 +30,10 @@ import java.util.function.Supplier;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
+import net.minecraft.network.Connection;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.GameProtocols;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
@@ -37,6 +44,8 @@ import net.minecraft.server.level.FullChunkStatus;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.TicketType;
+import net.minecraft.server.network.CommonListenerCookie;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.util.Mth;
 import net.minecraft.util.StringUtil;
 import net.minecraft.util.ProblemReporter;
@@ -65,6 +74,12 @@ public final class WorldlineControlServer {
     private static final AtomicBoolean STARTED = new AtomicBoolean();
     private static final Map<UUID, Preparation> PREPARATIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, FrozenPlayer> FROZEN_PLAYERS = new ConcurrentHashMap<>();
+    private static final Map<UUID, FrozenPlayer> CLEANED_SOURCES = new ConcurrentHashMap<>();
+    private static final Map<UUID, ActivatedDestination> ACTIVATED_DESTINATIONS =
+        new ConcurrentHashMap<>();
+    private static final Map<UUID, DestinationTerminal> RETIRED_DESTINATIONS =
+        new ConcurrentHashMap<>();
+    private static final int MAX_TERMINAL_IDENTITIES = 4_096;
     private static final WorldlineTransferLifecycle LIFECYCLE =
         new WorldlineTransferLifecycle(4_096);
 
@@ -139,6 +154,10 @@ public final class WorldlineControlServer {
         final long playerSessionEpoch = input.readLong();
         final long playerStateVersion = input.readLong();
         final long routeGeneration = input.readLong();
+        final PreparationIdentity preparationIdentity = new PreparationIdentity(
+            clientConnectionId, sourceServerId, destinationServerId, sourcePartitionId,
+            sourcePartitionEpoch, destinationPartitionId, destinationPartitionEpoch,
+            routeGeneration);
         final PrepareTarget target = input.readBoolean() ? readTarget(input) : null;
         final int payloadLength = input.readInt();
         if (payloadLength < 0 || payloadLength > MAX_PAYLOAD_BYTES) {
@@ -166,7 +185,7 @@ public final class WorldlineControlServer {
             result = checkReady(target, compatibilityId, true);
             if (result.accepted()) {
                 result = prepareDestination(Objects.requireNonNull(target), transferId, playerId,
-                    playerSessionEpoch);
+                    playerSessionEpoch, preparationIdentity);
                 if (result.accepted()) {
                     final CommandResult lifecycle = lifecycleResult(
                         LIFECYCLE.prepareDestination(playerId, transferId, playerSessionEpoch),
@@ -187,7 +206,8 @@ public final class WorldlineControlServer {
         } else if (command.equals("FREEZE_SOURCE")) {
             result = freezeSource(transferId, playerId, sourceServerId, destinationServerId,
                 sourcePartitionId, sourcePartitionEpoch, destinationPartitionId,
-                destinationPartitionEpoch, playerSessionEpoch, playerStateVersion);
+                destinationPartitionEpoch, playerSessionEpoch, playerStateVersion,
+                preparationIdentity);
             if (result.accepted()) {
                 final CommandResult lifecycle = lifecycleResult(
                     LIFECYCLE.freezeSource(playerId, transferId, playerSessionEpoch),
@@ -208,24 +228,27 @@ public final class WorldlineControlServer {
             result = stageSnapshot(payload, transferId, playerId, sourceServerId,
                 destinationServerId, sourcePartitionId, sourcePartitionEpoch,
                 destinationPartitionId, destinationPartitionEpoch, playerSessionEpoch,
-                playerStateVersion);
+                playerStateVersion, preparationIdentity);
             if (result.accepted()) {
                 result = lifecycleResult(
                     LIFECYCLE.stageDestination(playerId, transferId, playerSessionEpoch),
                     "snapshot staged");
             }
         } else if (command.equals("COMMIT_DESTINATION")) {
-            result = commitDestination(playerId, transferId, playerSessionEpoch);
+            result = commitDestination(playerId, transferId, playerSessionEpoch,
+                playerStateVersion, preparationIdentity);
         } else if (command.equals("COMMIT_SOURCE")) {
-            result = commitSource(playerId, transferId, playerSessionEpoch);
+            result = commitSource(playerId, transferId, playerSessionEpoch, playerStateVersion,
+                preparationIdentity);
         } else if (command.equals("ACTIVATE_DESTINATION")) {
-            result = postCommitDestination(playerId, transferId, playerSessionEpoch,
-                PostCommitDestinationCommand.ACTIVATE);
+            result = activateDestination(playerId, transferId, playerSessionEpoch,
+                playerStateVersion, preparationIdentity);
         } else if (command.equals("CLEAN_SOURCE")) {
-            result = cleanSource(playerId, transferId, playerSessionEpoch);
+            result = cleanSource(playerId, transferId, playerSessionEpoch, playerStateVersion,
+                preparationIdentity);
         } else if (command.equals("RETIRE_DESTINATION")) {
-            result = postCommitDestination(playerId, transferId, playerSessionEpoch,
-                PostCommitDestinationCommand.RETIRE);
+            result = retireDestination(playerId, transferId, playerSessionEpoch,
+                playerStateVersion, preparationIdentity);
         } else {
             throw new IllegalStateException("known command was not dispatched");
         }
@@ -271,49 +294,369 @@ public final class WorldlineControlServer {
         return SOURCE_COMMANDS.contains(command) || DESTINATION_COMMANDS.contains(command);
     }
 
+    /**
+     * Consumes the exact committed M4 preparation and binds the inbound play connection without
+     * registering or activating the player. Must be called from the server thread.
+     */
+    public static AttachedDestination attachPreparedDestination(
+        final WorldlineResumeContext context, final UUID loginPlayerId,
+        final Connection connection, final CommonListenerCookie cookie
+    ) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(loginPlayerId, "loginPlayerId");
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(cookie, "cookie");
+        if (!Boolean.getBoolean("worldline.resume")) {
+            throw new IllegalStateException("Worldline resume is disabled");
+        }
+        final MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || !server.isSameThread() || server.isStopped()) {
+            throw new IllegalStateException("destination attachment requires the active server thread");
+        }
+        final Preparation preparation = PREPARATIONS.get(loginPlayerId);
+        if (preparation == null || preparation.cancelled) {
+            throw new IllegalStateException("matching committed destination preparation missing");
+        }
+        synchronized (preparation) {
+            final WorldlineDestinationAttachment.Outcome validation =
+                preparation.attachment.validate(context, loginPlayerId);
+            if (validation != WorldlineDestinationAttachment.Outcome.APPLIED) {
+                throw new IllegalStateException("destination attachment fence rejected: "
+                    + validation.name().toLowerCase(java.util.Locale.ROOT));
+            }
+            final WorldlineTransferLifecycle.Outcome lifecycle = LIFECYCLE.attachDestination(
+                loginPlayerId, context.transferId(), context.sourcePlayerEpoch(),
+                context.committedPlayerEpoch());
+            if (lifecycle != WorldlineTransferLifecycle.Outcome.APPLIED
+                && lifecycle != WorldlineTransferLifecycle.Outcome.ALREADY_APPLIED) {
+                throw new IllegalStateException("destination lifecycle is not committed");
+            }
+            final ServerPlayer preparedPlayer = Objects.requireNonNull(preparation.player,
+                "preparedPlayer");
+            if (server.getPlayerList().getPlayer(loginPlayerId) != null) {
+                throw new IllegalStateException("destination player is already registered");
+            }
+            preparedPlayer.setId(context.priorEntityId());
+            final ServerGamePacketListenerImpl listener = new ServerGamePacketListenerImpl(
+                server, connection, preparedPlayer, cookie);
+            connection.setupInboundProtocol(GameProtocols.SERVERBOUND_TEMPLATE.bind(
+                RegistryFriendlyByteBuf.decorator(server.registryAccess()), listener), listener);
+            listener.suspendFlushing();
+            listener.worldlineSuppressInitialPackets = true;
+            final WorldlineDestinationAttachment.Result<ServerPlayer> attached =
+                preparation.attachment.attach(context, loginPlayerId);
+            if (attached.outcome() != WorldlineDestinationAttachment.Outcome.APPLIED
+                || attached.preparedPlayer() != preparedPlayer) {
+                throw new IllegalStateException("destination preparation was consumed concurrently");
+            }
+            preparation.attachedConnection = connection;
+            preparation.attachedListener = listener;
+            listener.worldlineTransferId = context.transferId();
+            preparation.attachedCookie = cookie;
+            LOGGER.info("Worldline attached inert destination player={} transfer={} entity_id={} "
+                    + "route_generation={}", loginPlayerId, context.transferId(),
+                context.priorEntityId(), context.routeGeneration());
+            return new AttachedDestination(preparedPlayer, listener);
+        }
+    }
+
     private static CommandResult commitDestination(final UUID playerId, final UUID transferId,
-                                                   final long committedEpoch) {
+                                                   final long committedEpoch,
+                                                   final long playerStateVersion,
+                                                   final PreparationIdentity committedIdentity) {
         if (committedEpoch < 1) {
             return CommandResult.rejected("committed player epoch must be positive");
         }
-        return lifecycleResult(LIFECYCLE.commitDestination(playerId, transferId,
-            committedEpoch - 1, committedEpoch), "destination committed");
+        final Preparation preparation = PREPARATIONS.get(playerId);
+        if (preparation == null || !preparation.transferId.equals(transferId)
+            || preparation.playerSessionEpoch != committedEpoch - 1
+            || preparation.playerStateVersion != playerStateVersion
+            || !preparation.identity.matchesCommitted(committedIdentity)) {
+            return CommandResult.rejected("matching destination preparation missing");
+        }
+        synchronized (preparation) {
+            try {
+                preparation.attachment.commit(committedEpoch,
+                    committedIdentity.routeGeneration);
+            } catch (IllegalArgumentException | IllegalStateException e) {
+                return CommandResult.rejected("destination commit fence rejected");
+            }
+            return lifecycleResult(LIFECYCLE.commitDestination(playerId, transferId,
+                committedEpoch - 1, committedEpoch), "destination committed");
+        }
     }
 
     private static CommandResult commitSource(final UUID playerId, final UUID transferId,
-                                              final long committedEpoch) {
+                                              final long committedEpoch,
+                                              final long playerStateVersion,
+                                              final PreparationIdentity identity) {
         if (committedEpoch < 1) {
             return CommandResult.rejected("committed player epoch must be positive");
         }
-        return lifecycleResult(LIFECYCLE.commitSource(playerId, transferId,
-            committedEpoch - 1, committedEpoch), "source committed away");
+        return onServerThread(() -> {
+            final FrozenPlayer frozen = FROZEN_PLAYERS.get(playerId);
+            if (frozen == null || !frozen.matchesCommitted(transferId, committedEpoch - 1,
+                playerStateVersion, identity)) {
+                return CommandResult.rejected("matching frozen source missing");
+            }
+            if (frozen.committedEpoch == committedEpoch) {
+                return CommandResult.accepted("already source committed away");
+            }
+            final MinecraftServer server = MinecraftServer.getServer();
+            final ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+            if (player == null) {
+                return CommandResult.rejected("frozen source player missing");
+            }
+            final CommandResult lifecycle = lifecycleResult(LIFECYCLE.commitSource(playerId,
+                transferId, committedEpoch - 1, committedEpoch), "source committed away");
+            if (!lifecycle.accepted()) {
+                return lifecycle;
+            }
+            player.worldlineCommittedAway = true;
+            FROZEN_PLAYERS.put(playerId, frozen.withCommittedEpoch(committedEpoch));
+            LOGGER.info("Worldline committed away source player={} transfer={} tick={} "
+                    + "committed_epoch={} authority_millis={}", playerId, transferId,
+                server.getTickCount(), committedEpoch, System.currentTimeMillis());
+            return lifecycle;
+        });
     }
 
     private static CommandResult cleanSource(final UUID playerId, final UUID transferId,
-                                             final long committedEpoch) {
+                                             final long committedEpoch,
+                                             final long playerStateVersion,
+                                             final PreparationIdentity identity) {
         if (committedEpoch < 1) {
             return CommandResult.rejected("committed player epoch must be positive");
         }
-        return lifecycleResult(LIFECYCLE.cleanSource(playerId, transferId,
-            committedEpoch - 1, committedEpoch), "source cleaned");
+        return onServerThread(() -> {
+            final FrozenPlayer frozen = FROZEN_PLAYERS.get(playerId);
+            if (frozen == null) {
+                final FrozenPlayer cleaned = CLEANED_SOURCES.get(playerId);
+                if (cleaned == null || cleaned.committedEpoch != committedEpoch
+                    || !cleaned.matchesCommitted(transferId, committedEpoch - 1,
+                        playerStateVersion, identity)) {
+                    return CommandResult.rejected("source cleanup terminal fence mismatch");
+                }
+                return lifecycleResult(LIFECYCLE.cleanSource(playerId, transferId,
+                    committedEpoch - 1, committedEpoch), "source cleaned");
+            }
+            if (frozen.committedEpoch != committedEpoch
+                || !frozen.matchesCommitted(transferId, committedEpoch - 1,
+                    playerStateVersion, identity)) {
+                return CommandResult.rejected("source cleanup fence mismatch");
+            }
+            final CommandResult lifecycle = lifecycleResult(LIFECYCLE.cleanSource(playerId,
+                transferId, committedEpoch - 1, committedEpoch), "source cleaned");
+            if (!lifecycle.accepted()) {
+                return lifecycle;
+            }
+            final MinecraftServer server = MinecraftServer.getServer();
+            final ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+            if (player != null) {
+                server.getPlayerList().worldlineCleanSourcePlayer(player);
+            }
+            FROZEN_PLAYERS.remove(playerId, frozen);
+            ACTIVATED_DESTINATIONS.remove(playerId);
+            rememberTerminal(CLEANED_SOURCES, playerId, frozen);
+            LOGGER.info("Worldline cleaned source player={} transfer={} tick={} committed_epoch={}",
+                playerId, transferId, server.getTickCount(), committedEpoch);
+            return lifecycle;
+        });
     }
 
-    private static CommandResult postCommitDestination(final UUID playerId,
-                                                       final UUID transferId,
-                                                       final long committedEpoch,
-                                                       final PostCommitDestinationCommand command) {
+    private static CommandResult activateDestination(final UUID playerId,
+                                                     final UUID transferId,
+                                                     final long committedEpoch,
+                                                     final long playerStateVersion,
+                                                     final PreparationIdentity committedIdentity) {
         if (committedEpoch < 1) {
             return CommandResult.rejected("committed player epoch must be positive");
         }
-        final long sourceEpoch = committedEpoch - 1;
-        final WorldlineTransferLifecycle.Outcome outcome = switch (command) {
-            case ACTIVATE -> LIFECYCLE.activateDestination(playerId, transferId, sourceEpoch,
-                committedEpoch);
-            case RETIRE -> LIFECYCLE.retireDestination(playerId, transferId, sourceEpoch,
-                committedEpoch);
-        };
-        return lifecycleResult(outcome, command == PostCommitDestinationCommand.ACTIVATE
-            ? "destination activated" : "destination retired");
+        return onServerThread(() -> {
+            final Preparation preparation = PREPARATIONS.get(playerId);
+            if (preparation == null) {
+                final ActivatedDestination activated = ACTIVATED_DESTINATIONS.get(playerId);
+                if (activated != null && activated.matches(transferId, committedEpoch,
+                    playerStateVersion, committedIdentity)) {
+                    return CommandResult.accepted("already destination activated");
+                }
+                return CommandResult.rejected("matching attached destination missing");
+            }
+            if (!preparation.transferId.equals(transferId)
+                || preparation.playerSessionEpoch != committedEpoch - 1
+                || preparation.playerStateVersion != playerStateVersion
+                || !preparation.identity.matchesCommitted(committedIdentity)) {
+                return CommandResult.rejected("matching attached destination missing");
+            }
+            synchronized (preparation) {
+                final WorldlineTransferLifecycle.DestinationState state =
+                    LIFECYCLE.destination(playerId).orElse(null);
+                if (state == null || !state.transferId().equals(transferId)
+                    || state.sourceEpoch() != committedEpoch - 1
+                    || state.committedEpoch() != committedEpoch) {
+                    return CommandResult.rejected("destination activation fence mismatch");
+                }
+                if (state.phase() == WorldlineTransferLifecycle.DestinationPhase.ACTIVE) {
+                    return CommandResult.accepted("already destination activated");
+                }
+                if (state.phase()
+                    != WorldlineTransferLifecycle.DestinationPhase.CONNECTION_ATTACHED
+                    || preparation.attachedListener == null || preparation.player == null) {
+                    return CommandResult.rejected("destination connection is not attached");
+                }
+                final String beforeMismatch = preparedSnapshotMismatch(preparation);
+                if (beforeMismatch != null) {
+                    return CommandResult.rejected(beforeMismatch);
+                }
+                final MinecraftServer server = MinecraftServer.getServer();
+                server.getPlayerList().worldlineActivatePlayer(preparation.player);
+                final String afterMismatch = preparedSnapshotMismatch(preparation);
+                if (afterMismatch != null) {
+                    server.getPlayerList().worldlineRetirePlayer(preparation.player);
+                    LIFECYCLE.retireDestination(playerId, transferId, committedEpoch - 1,
+                        committedEpoch);
+                    return CommandResult.rejected(afterMismatch);
+                }
+                final CommandResult lifecycle = lifecycleResult(LIFECYCLE.activateDestination(
+                    playerId, transferId, committedEpoch - 1, committedEpoch),
+                    "destination activated");
+                if (!lifecycle.accepted()) {
+                    server.getPlayerList().worldlineRetirePlayer(preparation.player);
+                    return lifecycle;
+                }
+                preparation.attachedListener.worldlineSuppressInitialPackets = false;
+                preparation.attachedListener.worldlineAwaitingFirstReplayMovement = true;
+                preparation.attachedListener.resumeFlushing();
+                final CommandResult cleaned = lifecycleResult(LIFECYCLE.cleanDestination(
+                    playerId, transferId, committedEpoch - 1, committedEpoch),
+                    "destination activation resources released");
+                if (!cleaned.accepted()) {
+                    preparation.attachedListener.worldlineSuppressInitialPackets = true;
+                    server.getPlayerList().worldlineRetirePlayer(preparation.player);
+                    return cleaned;
+                }
+                final ActivatedDestination activated = new ActivatedDestination(transferId,
+                    committedEpoch, playerStateVersion, committedIdentity, preparation.player,
+                    preparation.attachedListener, preparation.attachedConnection);
+                PREPARATIONS.remove(playerId, preparation);
+                cleanupPreparation(preparation);
+                ACTIVATED_DESTINATIONS.put(playerId, activated);
+                LOGGER.info("Worldline activated destination player={} transfer={} tick={} "
+                        + "committed_epoch={} snapshot_hash={} authority_millis={}", playerId,
+                    transferId, server.getTickCount(), committedEpoch,
+                    playerStateHash(activated.player), System.currentTimeMillis());
+                return lifecycle;
+            }
+        });
+    }
+
+    private static CommandResult retireDestination(final UUID playerId, final UUID transferId,
+                                                   final long committedEpoch,
+                                                   final long playerStateVersion,
+                                                   final PreparationIdentity committedIdentity) {
+        if (committedEpoch < 1) {
+            return CommandResult.rejected("committed player epoch must be positive");
+        }
+        final Connection[] connectionToClose = new Connection[1];
+        final CommandResult result = onServerThread(() -> {
+            final Preparation preparation = PREPARATIONS.get(playerId);
+            if (preparation == null) {
+                final ActivatedDestination activated = ACTIVATED_DESTINATIONS.get(playerId);
+                if (activated != null) {
+                    if (!activated.matches(transferId, committedEpoch, playerStateVersion,
+                        committedIdentity)) {
+                        return CommandResult.rejected(
+                            "destination retirement active fence mismatch");
+                    }
+                    final CommandResult lifecycle = lifecycleResult(LIFECYCLE.retireDestination(
+                        playerId, transferId, committedEpoch - 1, committedEpoch),
+                        "destination retired");
+                    if (!lifecycle.accepted()) {
+                        return lifecycle;
+                    }
+                    final MinecraftServer server = MinecraftServer.getServer();
+                    if (server.getPlayerList().getPlayer(playerId) == activated.player) {
+                        server.getPlayerList().worldlineRetirePlayer(activated.player);
+                    }
+                    activated.listener.worldlineSuppressInitialPackets = true;
+                    connectionToClose[0] = activated.connection;
+                    ACTIVATED_DESTINATIONS.remove(playerId, activated);
+                    rememberTerminal(RETIRED_DESTINATIONS, playerId,
+                        new DestinationTerminal(transferId, committedEpoch, playerStateVersion,
+                            committedIdentity));
+                    return lifecycle;
+                }
+                final DestinationTerminal retired = RETIRED_DESTINATIONS.get(playerId);
+                if (retired == null || !retired.matches(transferId, committedEpoch,
+                    playerStateVersion, committedIdentity)) {
+                    return CommandResult.rejected("destination retirement terminal fence mismatch");
+                }
+                return lifecycleResult(LIFECYCLE.retireDestination(playerId, transferId,
+                    committedEpoch - 1, committedEpoch), "destination retired");
+            }
+            synchronized (preparation) {
+                if (!preparation.transferId.equals(transferId)
+                    || preparation.playerSessionEpoch != committedEpoch - 1
+                    || preparation.playerStateVersion != playerStateVersion
+                    || !preparation.identity.matchesCommitted(committedIdentity)) {
+                    return CommandResult.rejected("destination retirement fence mismatch");
+                }
+                final CommandResult lifecycle = lifecycleResult(LIFECYCLE.retireDestination(
+                    playerId, transferId, committedEpoch - 1, committedEpoch),
+                    "destination retired");
+                if (!lifecycle.accepted()) {
+                    return lifecycle;
+                }
+                final MinecraftServer server = MinecraftServer.getServer();
+                if (preparation.player != null
+                    && server.getPlayerList().getPlayer(playerId) == preparation.player) {
+                    server.getPlayerList().worldlineRetirePlayer(preparation.player);
+                }
+                if (preparation.attachedListener != null) {
+                    preparation.attachedListener.worldlineSuppressInitialPackets = true;
+                }
+                connectionToClose[0] = preparation.attachedConnection;
+                preparation.attachment.retire();
+                cleanupPreparation(preparation);
+                PREPARATIONS.remove(playerId, preparation);
+                rememberTerminal(RETIRED_DESTINATIONS, playerId,
+                    new DestinationTerminal(transferId, committedEpoch, playerStateVersion,
+                        committedIdentity));
+                LOGGER.info("Worldline retired destination player={} transfer={} tick={}",
+                    playerId, transferId, server.getTickCount());
+                return lifecycle;
+            }
+        });
+        if (result.accepted() && connectionToClose[0] != null) {
+            connectionToClose[0].disconnect(Component.literal("Worldline destination retired"));
+        }
+        return result;
+    }
+
+    private static String preparedSnapshotMismatch(final Preparation preparation) {
+        if (preparation.player == null || preparation.stagedSnapshot == null) {
+            return "staged destination snapshot missing";
+        }
+        try {
+            final CompoundTag root = decodeSnapshot(preparation.stagedSnapshot);
+            final CompoundTag expectedPlayer = comparablePlayerState(
+                root.getCompound("Player").orElseThrow());
+            final TagValueOutput output = TagValueOutput.createWithContext(
+                ProblemReporter.DISCARDING, preparation.player.registryAccess());
+            preparation.player.saveWithoutId(output);
+            final CompoundTag actualPlayer = comparablePlayerState(output.buildResult());
+            if (!expectedPlayer.equals(actualPlayer)) {
+                return "prepared destination snapshot changed; differing keys="
+                    + differingKeys(expectedPlayer, actualPlayer);
+            }
+            final CompoundTag expectedTransient = root.getCompound("Transient").orElseThrow();
+            if (!expectedTransient.equals(preparation.player.worldline$saveTransientState())) {
+                return "prepared destination transient state changed";
+            }
+            return null;
+        } catch (IOException | RuntimeException e) {
+            return "prepared destination snapshot verification failed";
+        }
     }
 
     private static CommandResult lifecycleThen(final WorldlineTransferLifecycle.Outcome outcome,
@@ -346,14 +689,16 @@ public final class WorldlineControlServer {
                                               final String destinationPartitionId,
                                               final long destinationPartitionEpoch,
                                               final long playerSessionEpoch,
-                                              final long playerStateVersion) {
+                                              final long playerStateVersion,
+                                              final PreparationIdentity identity) {
         if (playerStateVersion < 1) {
             return CommandResult.rejected("player state version must be positive");
         }
         return onServerThread(() -> {
             final FrozenPlayer existing = FROZEN_PLAYERS.get(playerId);
             if (existing != null) {
-                return existing.matches(transferId, playerSessionEpoch, playerStateVersion)
+                return existing.matches(transferId, playerSessionEpoch, playerStateVersion,
+                    identity)
                     ? CommandResult.accepted("already frozen", existing.snapshot)
                     : CommandResult.rejected("player is frozen by another transfer");
             }
@@ -364,17 +709,22 @@ public final class WorldlineControlServer {
                 return CommandResult.rejected(unsupported);
             }
             FROZEN_PLAYERS.put(playerId, new FrozenPlayer(transferId, playerSessionEpoch,
-                playerStateVersion, new byte[0]));
+                playerStateVersion, new byte[0], 0, identity));
             try {
                 final byte[] snapshot = encodeSnapshot(player, server.getTickCount(), transferId,
                     sourceServerId, destinationServerId, sourcePartitionId,
                     sourcePartitionEpoch, destinationPartitionId, destinationPartitionEpoch,
                     playerSessionEpoch, playerStateVersion);
+                CLEANED_SOURCES.remove(playerId);
+                player.connection.worldlineTransferId = transferId;
+                player.connection.worldlineLoggedRejectedFrozenMovement = false;
                 FROZEN_PLAYERS.put(playerId, new FrozenPlayer(transferId, playerSessionEpoch,
-                    playerStateVersion, snapshot));
+                    playerStateVersion, snapshot, 0, identity));
                 LOGGER.info("Worldline froze source player={} transfer={} tick={} "
-                        + "player_state_version={} snapshot_bytes={}", playerId, transferId,
-                    server.getTickCount(), playerStateVersion, snapshot.length);
+                        + "player_state_version={} snapshot_bytes={} snapshot_hash={} "
+                        + "x={} y={} z={}", playerId, transferId, server.getTickCount(),
+                    playerStateVersion, snapshot.length, snapshotStateHash(snapshot),
+                    player.getX(), player.getY(), player.getZ());
                 return CommandResult.accepted("source frozen", snapshot);
             } catch (IOException | RuntimeException e) {
                 FROZEN_PLAYERS.remove(playerId);
@@ -393,6 +743,12 @@ public final class WorldlineControlServer {
                 return CommandResult.rejected("different transfer froze source");
             }
             FROZEN_PLAYERS.remove(playerId, frozen);
+            final ServerPlayer player = MinecraftServer.getServer().getPlayerList()
+                .getPlayer(playerId);
+            if (player != null && player.connection != null) {
+                player.connection.worldlineTransferId = null;
+                player.connection.worldlineLoggedRejectedFrozenMovement = false;
+            }
             LOGGER.info("Worldline unfroze source player={} transfer={}", playerId, transferId);
             return CommandResult.accepted("source active");
         });
@@ -407,7 +763,8 @@ public final class WorldlineControlServer {
                                                final String destinationPartitionId,
                                                final long destinationPartitionEpoch,
                                                final long playerSessionEpoch,
-                                               final long playerStateVersion) {
+                                               final long playerStateVersion,
+                                               final PreparationIdentity identity) {
         if (payload.length == 0) {
             return CommandResult.rejected("snapshot missing");
         }
@@ -415,6 +772,7 @@ public final class WorldlineControlServer {
             final Preparation preparation = PREPARATIONS.get(playerId);
             if (preparation == null || !preparation.transferId.equals(transferId)
                 || preparation.playerSessionEpoch != playerSessionEpoch
+                || !preparation.identity.equals(identity)
                 || preparation.player == null || preparation.cancelled) {
                 return CommandResult.rejected("matching destination preparation missing");
             }
@@ -450,6 +808,8 @@ public final class WorldlineControlServer {
                 if (!transientState.equals(preparation.player.worldline$saveTransientState())) {
                     return CommandResult.rejected("prepared player cannot reproduce transient state exactly");
                 }
+                preparation.attachment.stageSnapshot(playerStateVersion);
+                preparation.playerStateVersion = playerStateVersion;
                 preparation.stagedSnapshot = payload.clone();
                 LOGGER.info("Worldline staged exact snapshot player={} transfer={} "
                         + "player_state_version={} snapshot_bytes={}", playerId, transferId,
@@ -518,6 +878,51 @@ public final class WorldlineControlServer {
             throw new IOException("snapshot exceeds " + MAX_PAYLOAD_BYTES + " bytes");
         }
         return bytes;
+    }
+
+    private static String sha256(final byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
+    }
+
+    private static <T> void rememberTerminal(final Map<UUID, T> terminals,
+                                             final UUID playerId, final T value) {
+        terminals.put(playerId, value);
+        if (terminals.size() > MAX_TERMINAL_IDENTITIES) {
+            terminals.keySet().stream().filter(key -> !key.equals(playerId)).findAny()
+                .ifPresent(terminals::remove);
+        }
+    }
+
+    private static String snapshotStateHash(final byte[] snapshot) {
+        try {
+            final CompoundTag root = decodeSnapshot(snapshot);
+            return stateHash(root.getCompound("Player").orElseThrow(),
+                root.getCompound("Transient").orElseThrow());
+        } catch (IOException | RuntimeException e) {
+            throw new IllegalStateException("cannot hash snapshot state", e);
+        }
+    }
+
+    private static String playerStateHash(final ServerPlayer player) {
+        final TagValueOutput output = TagValueOutput.createWithContext(
+            ProblemReporter.DISCARDING, player.registryAccess());
+        player.saveWithoutId(output);
+        return stateHash(output.buildResult(), player.worldline$saveTransientState());
+    }
+
+    private static String stateHash(final CompoundTag player, final CompoundTag transientState) {
+        final CompoundTag state = new CompoundTag();
+        state.put("Player", comparablePlayerState(player));
+        state.put("Transient", transientState.copy());
+        try {
+            return sha256(writeNbt(state));
+        } catch (IOException e) {
+            throw new IllegalStateException("cannot encode canonical player state", e);
+        }
     }
 
     static CompoundTag decodeSnapshot(final byte[] payload) throws IOException {
@@ -653,20 +1058,23 @@ public final class WorldlineControlServer {
     private static CommandResult prepareDestination(final PrepareTarget target,
                                                     final UUID transferId,
                                                     final UUID playerId,
-                                                    final long playerSessionEpoch) {
+                                                    final long playerSessionEpoch,
+                                                    final PreparationIdentity identity) {
         final MinecraftServer server = MinecraftServer.getServer();
         if (server.getPlayerList().getPlayer(playerId) != null) {
             return CommandResult.rejected("player is already active on destination");
         }
         final Preparation preparation = new Preparation(transferId, playerId,
-            playerSessionEpoch, target);
+            playerSessionEpoch, target, identity);
         final Preparation existing = PREPARATIONS.putIfAbsent(playerId, preparation);
         if (existing != null) {
-            if (!existing.matches(transferId, playerSessionEpoch, target)) {
+            if (!existing.matches(transferId, playerSessionEpoch, target, identity)) {
                 return CommandResult.rejected("another transfer is already prepared");
             }
             return awaitPreparation(existing);
         }
+        RETIRED_DESTINATIONS.remove(playerId);
+        ACTIVATED_DESTINATIONS.remove(playerId);
         try {
             server.execute(() -> startPreparation(server, preparation));
         } catch (RuntimeException e) {
@@ -725,6 +1133,7 @@ public final class WorldlineControlServer {
             ClientInformation.createDefault());
         player.setPos(preparation.target.x(), preparation.target.y(), preparation.target.z());
         preparation.player = player;
+        preparation.attachment.bindPreparedPlayer(player);
         preparation.ready.complete(null);
         LOGGER.info("Worldline prepared non-authoritative player={} transfer={} chunk={} "
                 + "halo_radius={}", preparation.playerId, preparation.transferId,
@@ -787,6 +1196,24 @@ public final class WorldlineControlServer {
         preparation.ready.completeExceptionally(new IllegalStateException(detail));
     }
 
+    /** Releases the live-transfer identity when an activated destination disconnects normally. */
+    public static void releaseActivatedDestination(final UUID playerId,
+                                                   final ServerGamePacketListenerImpl listener) {
+        final MinecraftServer server = MinecraftServer.getServer();
+        if (server == null || !server.isSameThread()) {
+            throw new IllegalStateException(
+                "activated destination release requires the server thread");
+        }
+        final ActivatedDestination activated = ACTIVATED_DESTINATIONS.get(playerId);
+        if (activated == null || activated.listener != listener
+            || !ACTIVATED_DESTINATIONS.remove(playerId, activated)) {
+            return;
+        }
+        rememberTerminal(RETIRED_DESTINATIONS, playerId,
+            new DestinationTerminal(activated.transferId, activated.committedEpoch,
+                activated.playerStateVersion, activated.committedIdentity));
+    }
+
     private static void cleanupPreparation(final Preparation preparation) {
         if (preparation.ticketAdded && preparation.level != null
             && preparation.center != null && preparation.ticketType != null) {
@@ -840,18 +1267,88 @@ public final class WorldlineControlServer {
         }
     }
 
-    private enum PostCommitDestinationCommand {
-        ACTIVATE,
-        RETIRE
+    public record AttachedDestination(ServerPlayer player,
+                                      ServerGamePacketListenerImpl listener) {
+    }
+
+    private record PreparationIdentity(UUID clientConnectionId, String sourceServerId,
+                                       String destinationServerId, String sourcePartitionId,
+                                       long sourcePartitionEpoch, String destinationPartitionId,
+                                       long destinationPartitionEpoch, long routeGeneration) {
+        private PreparationIdentity {
+            Objects.requireNonNull(clientConnectionId, "clientConnectionId");
+            Objects.requireNonNull(sourceServerId, "sourceServerId");
+            Objects.requireNonNull(destinationServerId, "destinationServerId");
+            Objects.requireNonNull(sourcePartitionId, "sourcePartitionId");
+            Objects.requireNonNull(destinationPartitionId, "destinationPartitionId");
+        }
+
+        private boolean matchesCommitted(final PreparationIdentity committed) {
+            return this.clientConnectionId.equals(committed.clientConnectionId)
+                && this.sourceServerId.equals(committed.sourceServerId)
+                && this.destinationServerId.equals(committed.destinationServerId)
+                && this.sourcePartitionId.equals(committed.sourcePartitionId)
+                && this.sourcePartitionEpoch == committed.sourcePartitionEpoch
+                && this.destinationPartitionId.equals(committed.destinationPartitionId)
+                && this.destinationPartitionEpoch == committed.destinationPartitionEpoch
+                && this.routeGeneration < Long.MAX_VALUE
+                && committed.routeGeneration == this.routeGeneration + 1;
+        }
     }
 
     private record FrozenPlayer(UUID transferId, long playerSessionEpoch,
-                                long playerStateVersion, byte[] snapshot) {
+                                long playerStateVersion, byte[] snapshot,
+                                long committedEpoch, PreparationIdentity identity) {
         private boolean matches(final UUID transferId, final long playerSessionEpoch,
-                                final long playerStateVersion) {
+                                final long playerStateVersion,
+                                final PreparationIdentity identity) {
             return this.transferId.equals(transferId)
                 && this.playerSessionEpoch == playerSessionEpoch
-                && this.playerStateVersion == playerStateVersion;
+                && this.playerStateVersion == playerStateVersion
+                && this.identity.equals(identity);
+        }
+
+        private boolean matchesCommitted(final UUID transferId, final long playerSessionEpoch,
+                                         final long playerStateVersion,
+                                         final PreparationIdentity committedIdentity) {
+            return this.transferId.equals(transferId)
+                && this.playerSessionEpoch == playerSessionEpoch
+                && this.playerStateVersion == playerStateVersion
+                && this.identity.matchesCommitted(committedIdentity);
+        }
+
+        private FrozenPlayer withCommittedEpoch(final long committedEpoch) {
+            return new FrozenPlayer(this.transferId, this.playerSessionEpoch,
+                this.playerStateVersion, this.snapshot, committedEpoch, this.identity);
+        }
+    }
+
+    private record DestinationTerminal(UUID transferId, long committedEpoch,
+                                       long playerStateVersion,
+                                       PreparationIdentity committedIdentity) {
+        private boolean matches(final UUID transferId, final long committedEpoch,
+                                final long playerStateVersion,
+                                final PreparationIdentity committedIdentity) {
+            return this.transferId.equals(transferId)
+                && this.committedEpoch == committedEpoch
+                && this.playerStateVersion == playerStateVersion
+                && this.committedIdentity.equals(committedIdentity);
+        }
+    }
+
+    private record ActivatedDestination(UUID transferId, long committedEpoch,
+                                        long playerStateVersion,
+                                        PreparationIdentity committedIdentity,
+                                        ServerPlayer player,
+                                        ServerGamePacketListenerImpl listener,
+                                        Connection connection) {
+        private boolean matches(final UUID transferId, final long committedEpoch,
+                                final long playerStateVersion,
+                                final PreparationIdentity committedIdentity) {
+            return this.transferId.equals(transferId)
+                && this.committedEpoch == committedEpoch
+                && this.playerStateVersion == playerStateVersion
+                && this.committedIdentity.equals(committedIdentity);
         }
     }
 
@@ -860,6 +1357,8 @@ public final class WorldlineControlServer {
         private final UUID playerId;
         private final long playerSessionEpoch;
         private final PrepareTarget target;
+        private final PreparationIdentity identity;
+        private final WorldlineDestinationAttachment<ServerPlayer> attachment;
         private final CompletableFuture<Void> ready = new CompletableFuture<>();
         private volatile boolean cancelled;
         private ServerLevel level;
@@ -869,19 +1368,32 @@ public final class WorldlineControlServer {
         private boolean ticketAdded;
         private ServerPlayer player;
         private byte[] stagedSnapshot;
+        private long playerStateVersion;
+        private Connection attachedConnection;
+        private ServerGamePacketListenerImpl attachedListener;
+        private CommonListenerCookie attachedCookie;
 
         private Preparation(final UUID transferId, final UUID playerId,
-                            final long playerSessionEpoch, final PrepareTarget target) {
+                            final long playerSessionEpoch, final PrepareTarget target,
+                            final PreparationIdentity identity) {
             this.transferId = transferId;
             this.playerId = playerId;
             this.playerSessionEpoch = playerSessionEpoch;
             this.target = target;
+            this.identity = identity;
+            this.attachment = new WorldlineDestinationAttachment<>(transferId, playerId,
+                identity.clientConnectionId, identity.sourceServerId, identity.destinationServerId,
+                identity.sourcePartitionId, identity.sourcePartitionEpoch,
+                identity.destinationPartitionId, identity.destinationPartitionEpoch,
+                playerSessionEpoch, identity.routeGeneration);
         }
 
         private boolean matches(final UUID transferId, final long playerSessionEpoch,
-                                final PrepareTarget target) {
+                                final PrepareTarget target,
+                                final PreparationIdentity identity) {
             return this.transferId.equals(transferId)
-                && this.playerSessionEpoch == playerSessionEpoch && this.target.equals(target);
+                && this.playerSessionEpoch == playerSessionEpoch && this.target.equals(target)
+                && this.identity.equals(identity);
         }
     }
 }

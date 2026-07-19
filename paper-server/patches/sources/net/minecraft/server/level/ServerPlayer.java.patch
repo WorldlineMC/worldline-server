@@ -1,8 +1,11 @@
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -256,7 +_,8 @@
+@@ -255,8 +_,11 @@
+     private @Nullable Vec3 levitationStartPos;
      private int levitationStartTime;
      private boolean disconnected;
++    public boolean worldlineCommittedAway;
++    public boolean worldlineSourceCleaned;
      private int requestedViewDistance = 2;
 -    public String language = "en_us";
 +    public String language = null; // Paper - default to null
@@ -573,16 +576,16 @@
              }
          }
      }
-@@ -990,9 +_,20 @@
+@@ -990,9 +_,23 @@
          }
  
          Entity entity = source.getEntity();
-+        if (io.papermc.paper.worldline.WorldlineControlServer.isFrozen(this.getUUID())) {
-+            return false; // Worldline - frozen source players cannot receive authoritative damage
-+        }
 -        return !(entity instanceof Player player && !this.canHarmPlayer(player))
 -            && !(entity instanceof AbstractArrow arrow && arrow.getOwner() instanceof Player owner && !this.canHarmPlayer(owner))
 -            && super.hurtServer(level, source, damage);
++        if (io.papermc.paper.worldline.WorldlineControlServer.isFrozen(this.getUUID())) {
++            return false; // Worldline - frozen source players cannot receive authoritative damage
++        }
 +        if (!( // Paper - split the if statement. If below statement is false, hurtServer would not have been evaluated. Return false.
 +            !(entity instanceof Player player && !this.canHarmPlayer(player))
 +                && !(entity instanceof AbstractArrow arrow && arrow.getOwner() instanceof Player owner && !this.canHarmPlayer(owner))
@@ -1556,10 +1559,11 @@
          }
  
          private static float calculateLookAtYaw(final Vec3 position, final BlockPos lookAtBlockPos) {
-@@ -2325,4 +_,135 @@
+@@ -2324,5 +_,175 @@
+                 .apply(i, ServerPlayer.SavedPosition::new)
          );
          public static final ServerPlayer.SavedPosition EMPTY = new ServerPlayer.SavedPosition(Optional.empty(), Optional.empty(), Optional.empty());
-     }
++    }
 +
 +    // CraftBukkit start - Add per-player time and weather.
 +    public long timeOffset = 0;
@@ -1729,5 +1733,5 @@
 +        this.yya = state.getFloatOr("InputY", 0.0F);
 +        this.zza = state.getFloatOr("InputZ", 0.0F);
 +        this.getCooldowns().worldline$load(state.getCompound("ItemCooldowns").orElseThrow());
-+    }
+     }
  }

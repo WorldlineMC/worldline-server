@@ -41,13 +41,38 @@
          this.server = server;
          this.registries = registries;
          this.playerIo = playerIo;
-@@ -143,49 +_,56 @@
+@@ -143,49 +_,81 @@
          this.ipBans = new IpBanList(IPBANLIST_FILE, notificationService);
      }
  
 +    abstract public void loadAndSaveFiles(); // Paper - fix converting txt to json file; moved from DedicatedPlayerList constructor
 +
      public void placeNewPlayer(final Connection connection, final ServerPlayer player, final CommonListenerCookie cookie) {
++        final io.papermc.paper.worldline.WorldlineResumeContext worldlineContext = worldlineResumeContext(connection);
++        if (worldlineContext != null) {
++            final io.papermc.paper.worldline.WorldlineControlServer.AttachedDestination attached =
++                io.papermc.paper.worldline.WorldlineControlServer.attachPreparedDestination(
++                    worldlineContext, player.getUUID(), connection, cookie);
++            final ServerPlayer preparedPlayer = attached.player();
++            final ServerLevel preparedLevel = preparedPlayer.level();
++            final LevelData preparedLevelData = preparedLevel.getLevelData();
++            final GameRules preparedGameRules = preparedLevel.getGameRules();
++            connection.send(new ClientboundLoginPacket(
++                preparedPlayer.getId(),
++                preparedLevelData.isHardcore(),
++                this.server.levelKeys(),
++                this.getMaxPlayers(),
++                io.papermc.paper.FeatureHooks.getViewDistance(preparedLevel),
++                io.papermc.paper.FeatureHooks.getSimulationDistance(preparedLevel),
++                preparedGameRules.get(GameRules.REDUCED_DEBUG_INFO),
++                !preparedGameRules.get(GameRules.IMMEDIATE_RESPAWN),
++                preparedGameRules.get(GameRules.LIMITED_CRAFTING),
++                preparedPlayer.createCommonSpawnInfo(preparedLevel),
++                this.server.usesAuthentication(),
++                this.server.enforceSecureProfile()
++            ));
++            return;
++        }
 +        player.isRealPlayer = true; // Paper
 +        player.loginTime = System.currentTimeMillis(); // Paper - Replace OfflinePlayer#getLastPlayed
          NameAndId gameProfile = player.nameAndId();
@@ -113,7 +138,7 @@
          playerConnection.send(new ClientboundChangeDifficultyPacket(levelData.getDifficulty(), levelData.isDifficultyLocked()));
          playerConnection.send(new ClientboundPlayerAbilitiesPacket(player.getAbilities()));
          playerConnection.send(new ClientboundSetHeldSlotPacket(player.getInventory().getSelectedSlot()));
-@@ -205,24 +_,149 @@
+@@ -205,24 +_,233 @@
              component = Component.translatable("multiplayer.player.joined.renamed", player.getDisplayName(), oldName);
          }
  
@@ -250,6 +275,76 @@
 +        // Paper end - Send empty chunk
 +    }
 +
++    public void worldlineActivatePlayer(final ServerPlayer player) {
++        if (!this.server.isSameThread()) {
++            throw new IllegalStateException("Worldline destination activation must run on the server thread");
++        }
++        if (this.playersByUUID.containsKey(player.getUUID()) || this.players.contains(player)
++            || player.level().players().contains(player)) {
++            throw new IllegalStateException("Worldline destination player is already active");
++        }
++        player.isRealPlayer = true;
++        player.loginTime = System.currentTimeMillis();
++        this.server.services().nameToIdCache().add(player.nameAndId());
++        this.players.add(player);
++        this.playersByName.put(player.getScoreboardName().toLowerCase(java.util.Locale.ROOT), player);
++        this.playersByUUID.put(player.getUUID(), player);
++        player.suppressTrackerForLogin = true;
++        final ServerLevel level = player.level();
++        level.addNewPlayer(player);
++        this.server.getCustomBossEvents().onPlayerConnect(player);
++        player.initInventoryMenu();
++        player.containerMenu.transferTo(player.containerMenu, player.getBukkitEntity());
++        player.sentListPacket = true;
++        player.suppressTrackerForLogin = false;
++        level.getChunkSource().addEntity(player);
++        this.server.notificationManager().playerJoined(player);
++        this.server.invalidateStatus();
++    }
++
++    public void worldlineRetirePlayer(final ServerPlayer player) {
++        if (!this.server.isSameThread()) {
++            throw new IllegalStateException("Worldline destination retirement must run on the server thread");
++        }
++        player.connection.worldlineSuppressInitialPackets = true;
++        final ServerLevel level = player.level();
++        if (this.playersByUUID.get(player.getUUID()) == player) {
++            level.removePlayerImmediately(player, Entity.RemovalReason.DISCARDED);
++            this.players.remove(player);
++            this.playersByName.remove(player.getScoreboardName().toLowerCase(java.util.Locale.ROOT), player);
++            this.playersByUUID.remove(player.getUUID(), player);
++            this.server.getCustomBossEvents().onPlayerDisconnect(player);
++            this.server.notificationManager().playerLeft(player);
++            player.retireScheduler();
++            player.getAdvancements().clearTriggers();
++            this.cserver.getScoreboardManager().removePlayer(player.getBukkitEntity());
++            this.server.invalidateStatus();
++        }
++    }
++
++    public void worldlineCleanSourcePlayer(final ServerPlayer player) {
++        if (!this.server.isSameThread()) {
++            throw new IllegalStateException("Worldline source cleanup must run on the server thread");
++        }
++        if (!player.worldlineCommittedAway || player.worldlineSourceCleaned) {
++            return;
++        }
++        player.connection.worldlineSuppressInitialPackets = true;
++        if (this.playersByUUID.get(player.getUUID()) == player) {
++            player.level().removePlayerImmediately(player, Entity.RemovalReason.DISCARDED);
++            this.players.remove(player);
++            this.playersByName.remove(player.getScoreboardName().toLowerCase(java.util.Locale.ROOT), player);
++            this.playersByUUID.remove(player.getUUID(), player);
++            this.server.getCustomBossEvents().onPlayerDisconnect(player);
++            this.server.notificationManager().playerLeft(player);
++            player.retireScheduler();
++            player.getAdvancements().clearTriggers();
++            this.cserver.getScoreboardManager().removePlayer(player.getBukkitEntity());
++            this.server.invalidateStatus();
++        }
++        player.worldlineSourceCleaned = true;
++    }
++
 +    private static @Nullable Integer worldlineResumeEntityId(final Connection connection) {
 +        if (!Boolean.getBoolean("worldline.resume")) {
 +            return null;
@@ -265,6 +360,20 @@
 +        } catch (NumberFormatException ignored) {
 +            return null;
 +        }
++    }
++
++    private static io.papermc.paper.worldline.@Nullable WorldlineResumeContext worldlineResumeContext(
++        final Connection connection
++    ) {
++        final java.util.Optional<io.papermc.paper.worldline.WorldlineResumeContext> context =
++            io.papermc.paper.worldline.WorldlineResumeContext.parseHostname(connection.hostname);
++        if (context.isEmpty()) {
++            return null;
++        }
++        if (!Boolean.getBoolean("worldline.resume")) {
++            throw new IllegalStateException("Worldline resume marker received while resume is disabled");
++        }
++        return context.orElseThrow();
      }
  
      public void updateEntireScoreboard(final ServerScoreboard scoreboard, final ServerPlayer player) {
@@ -314,10 +423,11 @@
              }
  
              @Override
-@@ -292,65 +_,146 @@
+@@ -292,65 +_,151 @@
      }
  
      protected void save(final ServerPlayer player) {
++        if (player.worldlineCommittedAway) return;
 +        if (!player.getBukkitEntity().isPersistent()) return; // CraftBukkit
          this.playerIo.save(player);
 -        ServerStatsCounter stats = this.stats.get(player.getUUID());
@@ -340,6 +450,10 @@
 +    }
 +    public net.kyori.adventure.text.@Nullable Component remove(final ServerPlayer player, final net.kyori.adventure.text.Component leaveMessage) {
 +        // Paper end - Fix kick event leave message not being sent
++        if (player.worldlineCommittedAway) {
++            this.worldlineCleanSourcePlayer(player);
++            return null;
++        }
          ServerLevel level = player.level();
          player.awardStat(Stats.LEAVE_GAME);
 +        // CraftBukkit start - Quitting must be before we do final save of data, in case plugins need to modify it

@@ -103,6 +103,15 @@ public class WorldlineTransferLifecycleTest {
     }
 
     @Test
+    void destinationCannotActivateBeforeConnectionAttachment() {
+        WorldlineTransferLifecycle lifecycle = committedDestination();
+
+        assertEquals(REJECTED_MISMATCH,
+            lifecycle.activateDestination(PLAYER, TRANSFER, 4, 5));
+        assertEquals(COMMITTED, lifecycle.destination(PLAYER).orElseThrow().phase());
+    }
+
+    @Test
     void terminalResultsAreBoundedAndOldestEntriesBecomeMissing() {
         WorldlineTransferLifecycle lifecycle = new WorldlineTransferLifecycle(2);
         UUID first = UUID.fromString("00000000-0000-0000-0000-000000000061");

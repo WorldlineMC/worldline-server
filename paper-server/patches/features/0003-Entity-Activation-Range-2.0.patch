@@ -355,7 +355,7 @@ index 0000000000000000000000000000000000000000..829f7685904fd741e00403647ae76d32
 +    }
 +}
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index ac3d8d819bc5042b476f68a2c023cc5717fde847..bbfe1e0519929ad91d3aecabb510fbf436c203d3 100644
+index 378a4bcc36d7adc10a9bbd842fd2b7899ef4944c..6e753e73fce5d57dce44fc04b696e06eb78d9e34 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -879,6 +879,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -366,7 +366,7 @@ index ac3d8d819bc5042b476f68a2c023cc5717fde847..bbfe1e0519929ad91d3aecabb510fbf4
              this.entityTickList
                  .forEach(
                      entity -> {
-@@ -1397,12 +1398,15 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1401,12 +1402,15 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          entity.totalEntityAge++; // Paper - age-like counter for all entities
          profiler.push(entity.typeHolder()::getRegisteredName);
          profiler.incrementCounter("tickNonPassenger");
@@ -383,7 +383,7 @@ index ac3d8d819bc5042b476f68a2c023cc5717fde847..bbfe1e0519929ad91d3aecabb510fbf4
          }
          // Paper start - log detailed entity tick information
          } finally {
-@@ -1413,7 +1417,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1417,7 +1421,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
          // Paper end - log detailed entity tick information
      }
  
@@ -392,7 +392,7 @@ index ac3d8d819bc5042b476f68a2c023cc5717fde847..bbfe1e0519929ad91d3aecabb510fbf4
          if (entity.isRemoved() || entity.getVehicle() != vehicle) {
              entity.stopRiding();
          } else if (entity instanceof Player || this.entityTickList.contains(entity)) {
-@@ -1423,12 +1427,21 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
+@@ -1427,12 +1431,21 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
              ProfilerFiller profiler = Profiler.get();
              profiler.push(entity.typeHolder()::getRegisteredName);
              profiler.incrementCounter("tickPassenger");

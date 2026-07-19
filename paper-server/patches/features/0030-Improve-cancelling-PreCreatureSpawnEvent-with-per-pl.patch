@@ -37,7 +37,7 @@ index a79b74beb7a21dccf667eb0dea0506339acc797d..b42bf0ecd381c07ff7c42dea3970f598
      // Paper end - Optional per player mob spawns
  
 diff --git a/net/minecraft/server/level/ServerChunkCache.java b/net/minecraft/server/level/ServerChunkCache.java
-index a7ef3915dca196e6c5afac43dff99c870f4dee2a..c3adbe0753f6a4158f25126ed7443f8a958763d9 100644
+index 6ff4f973fbac35a2f3a62c633de8b55b091e0923..075e294333115738b25b64a390df323276cf39f9 100644
 --- a/net/minecraft/server/level/ServerChunkCache.java
 +++ b/net/minecraft/server/level/ServerChunkCache.java
 @@ -540,7 +540,17 @@ public class ServerChunkCache extends ChunkSource implements ca.spottedleaf.moon
@@ -60,10 +60,10 @@ index a7ef3915dca196e6c5afac43dff99c870f4dee2a..c3adbe0753f6a4158f25126ed7443f8a
              spawnCookie = NaturalSpawner.createState(chunkCount, this.level.getAllEntities(), this::getFullChunk, null, true);
          } else {
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
-index 2e261e411bee7777008696d992c2e30cf5ca0c5e..3ee3d29340bc82b071d621e8e3afa294c20dd06f 100644
+index 5316a84a875b3991c861c76c4bb0392aef8f2d99..2dcff891476760f1cece36bc9693ed6db8149415 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
 +++ b/net/minecraft/server/level/ServerPlayer.java
-@@ -421,6 +421,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+@@ -423,6 +423,7 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
      public static final int MOBCATEGORY_TOTAL_ENUMS = net.minecraft.world.entity.MobCategory.values().length;
      public final int[] mobCounts = new int[MOBCATEGORY_TOTAL_ENUMS];
      // Paper end - Optional per player mob spawns

@@ -1,5 +1,13 @@
 --- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
 +++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -20,6 +_,7 @@
+ import java.util.Objects;
+ import java.util.Optional;
+ import java.util.Set;
++import java.util.UUID;
+ import java.util.concurrent.CancellationException;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.TimeUnit;
 @@ -222,6 +_,37 @@
  import org.jspecify.annotations.Nullable;
  import org.slf4j.Logger;
@@ -38,11 +46,14 @@
  public class ServerGamePacketListenerImpl
      extends ServerCommonPacketListenerImpl
      implements ServerGamePacketListener,
-@@ -238,12 +_,15 @@
+@@ -238,12 +_,18 @@
      private static final Component INVALID_COMMAND_SIGNATURE = Component.translatable("chat.disabled.invalid_command_signature").withStyle(ChatFormatting.RED);
      private static final int MAX_COMMAND_SUGGESTIONS = 1000;
      public ServerPlayer player;
 +    public boolean worldlineSuppressInitialPackets;
++    public @Nullable UUID worldlineTransferId;
++    public boolean worldlineAwaitingFirstReplayMovement;
++    public boolean worldlineLoggedRejectedFrozenMovement;
      public final PlayerChunkSender chunkSender;
      private int tickCount;
      private int ackBlockChangesUpTo = -1;
@@ -704,9 +715,20 @@
          }
      }
  
-@@ -1064,10 +_,10 @@
+@@ -1063,11 +_,21 @@
+     @Override
      public void handleMovePlayer(final ServerboundMovePlayerPacket packet) {
          PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
++        if (io.papermc.paper.worldline.WorldlineControlServer.isFrozen(this.player.getUUID())) {
++            if (!this.worldlineLoggedRejectedFrozenMovement) {
++                this.worldlineLoggedRejectedFrozenMovement = true;
++                LOGGER.info("Worldline rejected frozen source movement player={} transfer={} "
++                        + "x={} y={} z={}", this.player.getUUID(), this.worldlineTransferId,
++                    packet.getX(this.player.getX()), packet.getY(this.player.getY()),
++                    packet.getZ(this.player.getZ()));
++            }
++            return;
++        }
          if (containsInvalidValues(packet.getX(0.0), packet.getY(0.0), packet.getZ(0.0), packet.getYRot(0.0F), packet.getXRot(0.0F))) {
 -            this.disconnect(Component.translatable("multiplayer.disconnect.invalid_player_movement"));
 +            this.disconnect(Component.translatable("multiplayer.disconnect.invalid_player_movement"), org.bukkit.event.player.PlayerKickEvent.Cause.INVALID_PLAYER_MOVEMENT); // Paper - kick event cause
@@ -717,7 +739,19 @@
                  if (this.tickCount == 0) {
                      this.resetPosition();
                  }
-@@ -1084,7 +_,12 @@
+@@ -1081,10 +_,24 @@
+                         double targetX = clampHorizontal(packet.getX(this.player.getX()));
+                         double targetY = clampVertical(packet.getY(this.player.getY()));
+                         double targetZ = clampHorizontal(packet.getZ(this.player.getZ()));
++                        if (this.worldlineAwaitingFirstReplayMovement
++                            && this.worldlineTransferId != null) {
++                            this.worldlineAwaitingFirstReplayMovement = false;
++                            LOGGER.info("Worldline processed first replay movement player={} transfer={} "
++                                    + "has_position={} x={} y={} z={} tick={}",
++                                this.player.getUUID(), this.worldlineTransferId,
++                                packet.hasPosition(), targetX, targetY, targetZ,
++                                this.server.getTickCount());
++                        }
                          if (this.player.isPassenger()) {
                              this.player.absSnapTo(this.player.getX(), this.player.getY(), this.player.getZ(), targetYRot, targetXRot);
                              this.player.level().getChunkSource().move(this.player);
@@ -1338,11 +1372,13 @@
                      return;
                  }
              }
-@@ -1463,23 +_,42 @@
+@@ -1463,23 +_,44 @@
      @Override
      public void onDisconnect(final DisconnectionDetails details) {
          LOGGER.info("{} lost connection: {}", this.player.getPlainTextName(), details.reason().getString());
 -        this.removePlayerFromWorld();
++        io.papermc.paper.worldline.WorldlineControlServer.releaseActivatedDestination(
++            this.player.getUUID(), this);
 +        // Paper start - Fix kick event leave message not being sent
 +        final net.kyori.adventure.text.Component quitMessage = details.quitMessage().map(io.papermc.paper.adventure.PaperAdventure::asAdventure).orElse(null);
 +        this.removePlayerFromWorld(quitMessage);
@@ -2616,10 +2652,11 @@
          this.clientLoadedTimeoutTimer = 0;
      }
  
-@@ -2248,4 +_,80 @@
+@@ -2247,5 +_,89 @@
+     public void restartClientLoadTimerAfterRespawn() {
          this.waitingForRespawn = false;
          this.clientLoadedTimeoutTimer = 60;
-     }
++    }
 +
 +    // Paper start - Add fail move event
 +    private io.papermc.paper.event.player.PlayerFailMoveEvent fireFailMove(io.papermc.paper.event.player.PlayerFailMoveEvent.FailReason failReason,
@@ -2703,5 +2740,5 @@
 +            && !this.waitingForSwitchToConfig
 +            && !this.waitingForRespawn
 +            && this.clientLoadedTimeoutTimer <= 0;
-+    }
+     }
  }

@@ -155,7 +155,7 @@ index a94e6ca1d396b6b0781de5d550c4a804274ee003..a1018e9ca9dfb978d6e6633577abd7d5
  
      private ClientboundLevelChunkWithLightPacket(final RegistryFriendlyByteBuf input) {
 diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
-index 586b7de5147dccb9dfa84766c71db9b58bc39abc..ca1725b9ad40f41e241447e14948ee4116c3e4c9 100644
+index 047bb083c005295199ff4151113a8913c707f02c..74fcb1858787bf5e3ecc97ec54c84372af396805 100644
 --- a/net/minecraft/server/level/ServerLevel.java
 +++ b/net/minecraft/server/level/ServerLevel.java
 @@ -634,7 +634,7 @@ public class ServerLevel extends Level implements WorldGenLevel, ServerEntityGet
@@ -196,10 +196,10 @@ index 22b10500ef74694243a4fec40822bb54ef96cc0c..196c01fe5f200ed57e6f23e0939cac61
          if (io.papermc.paper.event.packet.PlayerChunkLoadEvent.getHandlerList().getRegisteredListeners().length > 0) {
              new io.papermc.paper.event.packet.PlayerChunkLoadEvent(new org.bukkit.craftbukkit.CraftChunk(chunk), connection.getPlayer().getBukkitEntity()).callEvent();
 diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
-index 9c507ef7de8d3ce054b2086a054026486b9f82fd..e84524558647d91daae4bcbae0a40374d725de0c 100644
+index 9cf30ff3fd6afb8f7c8c483b668a6d6a329ba8be..7503ca563fe68b63c471225f6785c4e3b18e79fd 100644
 --- a/net/minecraft/server/players/PlayerList.java
 +++ b/net/minecraft/server/players/PlayerList.java
-@@ -344,7 +344,7 @@ public abstract class PlayerList {
+@@ -369,7 +369,7 @@ public abstract class PlayerList {
                  .getOrThrow(net.minecraft.world.level.biome.Biomes.PLAINS);
              player.connection.send(new net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket(
                  new net.minecraft.world.level.chunk.EmptyLevelChunk(level, player.chunkPosition(), plains),

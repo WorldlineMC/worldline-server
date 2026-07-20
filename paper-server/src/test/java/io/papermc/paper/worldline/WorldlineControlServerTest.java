@@ -18,6 +18,7 @@ import java.net.Socket;
 import java.util.Arrays;
 import java.util.UUID;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtIo;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.item.ItemCooldowns;
@@ -166,6 +167,31 @@ public class WorldlineControlServerTest {
 
         destination.putFloat("Health", 16.5F);
         assertNotEquals(WorldlineControlServer.comparablePlayerState(source),
+            WorldlineControlServer.comparablePlayerState(destination));
+    }
+
+    @Test
+    void snapshotComparisonCanonicalizesAttributeOrder() {
+        CompoundTag movementSpeed = new CompoundTag();
+        movementSpeed.putString("id", "minecraft:movement_speed");
+        movementSpeed.putDouble("base", 0.1);
+        CompoundTag maxHealth = new CompoundTag();
+        maxHealth.putString("id", "minecraft:max_health");
+        maxHealth.putDouble("base", 20.0);
+
+        ListTag sourceAttributes = new ListTag();
+        sourceAttributes.add(movementSpeed);
+        sourceAttributes.add(maxHealth);
+        CompoundTag source = new CompoundTag();
+        source.put("attributes", sourceAttributes);
+
+        ListTag destinationAttributes = new ListTag();
+        destinationAttributes.add(maxHealth.copy());
+        destinationAttributes.add(movementSpeed.copy());
+        CompoundTag destination = new CompoundTag();
+        destination.put("attributes", destinationAttributes);
+
+        assertEquals(WorldlineControlServer.comparablePlayerState(source),
             WorldlineControlServer.comparablePlayerState(destination));
     }
 

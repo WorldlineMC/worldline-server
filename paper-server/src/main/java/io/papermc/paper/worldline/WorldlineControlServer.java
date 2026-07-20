@@ -13,6 +13,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.Map;
 import java.util.Objects;
@@ -58,7 +59,9 @@ import org.slf4j.LoggerFactory;
 
 /** Slice-only TCP endpoint for the Worldline handoff control plane. */
 public final class WorldlineControlServer {
-    private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl");
+
+private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl");
+
     private static final int MAGIC = 0x574c4d32;
     private static final int PROTOCOL_VERSION = 4;
     private static final int SNAPSHOT_SCHEMA_VERSION = 1;
@@ -83,8 +86,7 @@ public final class WorldlineControlServer {
     private static final WorldlineTransferLifecycle LIFECYCLE =
         new WorldlineTransferLifecycle(4_096);
 
-    private WorldlineControlServer() {
-    }
+    private WorldlineControlServer() {}
 
     public static void start() {
         final String serverId = System.getProperty("worldline.server-id", "");
@@ -961,6 +963,9 @@ public final class WorldlineControlServer {
 
     static CompoundTag comparablePlayerState(final CompoundTag playerTag) {
         final CompoundTag state = playerTag.copy();
+        state.getList("attributes").ifPresent(attributes -> attributes.sort(
+            Comparator.comparing(attribute -> attribute instanceof CompoundTag compound
+                ? compound.getStringOr("id", "") : attribute.toString())));
         state.remove("WorldUUIDLeast");
         state.remove("WorldUUIDMost");
         state.getCompound("bukkit").ifPresent(bukkit -> bukkit.remove("lastPlayed"));

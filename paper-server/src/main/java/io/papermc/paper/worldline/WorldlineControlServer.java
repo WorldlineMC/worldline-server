@@ -75,6 +75,8 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
         "ACTIVATE_DESTINATION", "RETIRE_DESTINATION"
     );
     private static final AtomicBoolean STARTED = new AtomicBoolean();
+    private static final WorldlineControlRequestExecutor REQUEST_EXECUTOR =
+        new WorldlineControlRequestExecutor(16);
     private static final Map<UUID, Preparation> PREPARATIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, FrozenPlayer> FROZEN_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, FrozenPlayer> CLEANED_SOURCES = new ConcurrentHashMap<>();
@@ -119,16 +121,32 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
             LOGGER.info("Worldline control listening on 127.0.0.1:{} as owner of {} epoch {}",
                 port, partitionId, partitionEpoch);
             while (!Thread.currentThread().isInterrupted()) {
-                try (Socket socket = listener.accept()) {
+                try {
+                    final Socket socket = listener.accept();
                     socket.setSoTimeout(2_000);
-                    handle(socket, serverId, partitionId, partitionEpoch, compatibilityId);
-                } catch (EOFException ignored) {
+                    if (!REQUEST_EXECUTOR.execute(() -> handleAcceptedSocket(socket, serverId,
+                        partitionId, partitionEpoch, compatibilityId))) {
+                        socket.close();
+                        LOGGER.warn("Worldline control request rejected: executor saturated");
+                    }
                 } catch (IOException | RuntimeException e) {
                     LOGGER.warn("Worldline control request failed: {}", e.getMessage());
                 }
             }
         } catch (IOException e) {
             LOGGER.error("Worldline control endpoint failed", e);
+        }
+    }
+
+    private static void handleAcceptedSocket(final Socket socket, final String serverId,
+                                             final String partitionId,
+                                             final long partitionEpoch,
+                                             final String compatibilityId) {
+        try (socket) {
+            handle(socket, serverId, partitionId, partitionEpoch, compatibilityId);
+        } catch (EOFException ignored) {
+        } catch (IOException | RuntimeException exception) {
+            LOGGER.warn("Worldline control request failed: {}", exception.getMessage());
         }
     }
 
@@ -1008,22 +1026,32 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
         if (server == null || server.isStopped()) {
             return CommandResult.rejected("server is not active");
         }
-        final CompletableFuture<CommandResult> result = new CompletableFuture<>();
-        try {
-            server.execute(() -> {
+        final WorldlineMainThreadOperation<CommandResult> pending =
+            new WorldlineMainThreadOperation<>(() -> {
                 try {
-                    result.complete(operation.call());
-                } catch (Exception e) {
-                    result.complete(CommandResult.rejected("server operation failed: "
-                        + e.getMessage()));
+                    return operation.call();
+                } catch (Exception exception) {
+                    return CommandResult.rejected("server operation failed: "
+                        + exception.getMessage());
                 }
             });
-            return result.get(1_000, TimeUnit.MILLISECONDS);
+        try {
+            pending.submit(server::execute);
+            return pending.await(1_000, TimeUnit.MILLISECONDS)
+                .orElseGet(() -> CommandResult.rejected("server operation timed out"));
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return CommandResult.rejected("server operation interrupted");
-        } catch (ExecutionException | TimeoutException | RuntimeException e) {
-            return CommandResult.rejected("server operation timed out");
+            if (pending.cancelBeforeStart()) {
+                Thread.currentThread().interrupt();
+                return CommandResult.rejected("server operation interrupted");
+            }
+            try {
+                return pending.awaitCompletionUninterruptibly();
+            } catch (ExecutionException executionException) {
+                return CommandResult.rejected("server operation failed");
+            }
+        } catch (ExecutionException | RuntimeException e) {
+            pending.cancelBeforeStart();
+            return CommandResult.rejected("server operation failed");
         }
     }
 

@@ -11,6 +11,8 @@ import java.util.UUID;
 /**
  * Thread-safe transfer lifecycle registry. This class deliberately owns no Minecraft objects so
  * control-command idempotency can be decided before scheduling work on the server thread.
+ * Terminal results, including aborts received before their delayed start commands, retain replay
+ * protection within the bounded tombstone history. This slice registry is not restart-persistent.
  */
 public final class WorldlineTransferLifecycle {
     private final int maxTombstones;
@@ -153,9 +155,17 @@ public final class WorldlineTransferLifecycle {
 
     public synchronized Outcome abortDestination(final UUID playerId, final UUID transferId,
                                                  final long sourceEpoch) {
+        if (!validIdentity(playerId, transferId, sourceEpoch)) {
+            return Outcome.REJECTED_MISMATCH;
+        }
         final DestinationState existing = findDestination(playerId, transferId, sourceEpoch);
+        if (existing == null) {
+            terminalDestination(new DestinationState(playerId, transferId, sourceEpoch, 0,
+                DestinationPhase.ABORTED));
+            return Outcome.APPLIED;
+        }
         if (!matches(existing, transferId, sourceEpoch, 0)) {
-            return existing == null ? Outcome.MISSING : Outcome.REJECTED_MISMATCH;
+            return Outcome.REJECTED_MISMATCH;
         }
         if (existing.phase == DestinationPhase.ABORTED) {
             return Outcome.ALREADY_APPLIED;
@@ -176,6 +186,8 @@ public final class WorldlineTransferLifecycle {
         final SourceState existing = findSource(playerId, transferId, sourceEpoch);
         if (existing != null) {
             return existing.matches(transferId, sourceEpoch, existing.committedEpoch)
+                && (existing.phase == SourcePhase.FROZEN
+                    || existing.phase == SourcePhase.COMMITTED_AWAY)
                 ? Outcome.ALREADY_APPLIED : Outcome.REJECTED_MISMATCH;
         }
         sources.put(playerId, new SourceState(playerId, transferId, sourceEpoch, 0,
@@ -197,22 +209,31 @@ public final class WorldlineTransferLifecycle {
             sources.put(playerId, existing.committed(committedEpoch));
             return Outcome.APPLIED;
         }
-        return Outcome.ALREADY_APPLIED;
+        return existing.phase == SourcePhase.COMMITTED_AWAY || existing.phase == SourcePhase.CLEANED
+            ? Outcome.ALREADY_APPLIED : Outcome.REJECTED_MISMATCH;
     }
 
     public synchronized Outcome abortSource(final UUID playerId, final UUID transferId,
                                             final long sourceEpoch) {
+        if (!validIdentity(playerId, transferId, sourceEpoch)) {
+            return Outcome.REJECTED_MISMATCH;
+        }
         final SourceState existing = findSource(playerId, transferId, sourceEpoch);
         if (existing == null) {
-            return Outcome.MISSING;
+            terminalSource(new SourceState(playerId, transferId, sourceEpoch, 0,
+                SourcePhase.ABORTED));
+            return Outcome.APPLIED;
         }
         if (!existing.transferId.equals(transferId) || existing.sourceEpoch != sourceEpoch) {
             return Outcome.REJECTED_MISMATCH;
         }
+        if (existing.phase == SourcePhase.ABORTED) {
+            return Outcome.ALREADY_APPLIED;
+        }
         if (existing.phase != SourcePhase.FROZEN) {
             return Outcome.REJECTED_MISMATCH;
         }
-        sources.remove(playerId);
+        terminalSource(existing.withPhase(SourcePhase.ABORTED));
         return Outcome.APPLIED;
     }
 
@@ -346,7 +367,8 @@ public final class WorldlineTransferLifecycle {
     public enum SourcePhase {
         FROZEN,
         COMMITTED_AWAY,
-        CLEANED
+        CLEANED,
+        ABORTED
     }
 
     public record DestinationState(UUID playerId, UUID transferId, long sourceEpoch,

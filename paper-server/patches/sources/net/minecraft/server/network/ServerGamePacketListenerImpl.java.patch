@@ -139,6 +139,16 @@
              }
          }
      }
+@@ -314,5 +_,9 @@
+     private boolean tickPlayer() {
++        // Worldline - pause simulation while tick() continues protocol maintenance.
++        if (io.papermc.paper.worldline.WorldlineControlServer.isFrozen(this.player.getUUID())) {
++            return false;
++        }
+         this.resetPosition();
+         this.player.xo = this.player.getX();
+         this.player.yo = this.player.getY();
+         this.player.zo = this.player.getZ();
 @@ -322,8 +_,8 @@
          this.knownMovePacketCount = this.receivedMovePacketCount;
          if (this.clientIsFloating && !this.player.isSleeping() && !this.player.isPassenger() && !this.player.isDeadOrDying()) {

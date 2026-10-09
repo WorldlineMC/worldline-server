@@ -8,6 +8,7 @@ import io.papermc.paper.worldline.WorldlineMainThreadOperationTest;
 import io.papermc.paper.worldline.WorldlinePlayerCommandLocksTest;
 import io.papermc.paper.worldline.WorldlineResumeContextTest;
 import io.papermc.paper.worldline.WorldlineTransferLifecycleTest;
+import net.minecraft.server.network.WorldlineFrozenTickTest;
 import org.junit.platform.suite.api.SelectClasses;
 import org.junit.platform.suite.api.Suite;
 import org.junit.platform.suite.api.SuiteDisplayName;
@@ -17,6 +18,6 @@ import org.junit.platform.suite.api.SuiteDisplayName;
 @SelectClasses({WorldlineControlServerTest.class, WorldlineControlRequestExecutorTest.class,
     WorldlineDestinationAttachmentTest.class, WorldlineMainThreadOperationTest.class,
     WorldlineResumeContextTest.class, WorldlineTransferLifecycleTest.class,
-    WorldlinePlayerCommandLocksTest.class, WorldlineFirstReplayMovementTest.class})
+    WorldlinePlayerCommandLocksTest.class, WorldlineFirstReplayMovementTest.class, WorldlineFrozenTickTest.class})
 public class WorldlineTestSuite {
 }

@@ -146,6 +146,43 @@ public class WorldlineTransferLifecycleTest {
             destinations.destination(PLAYER).orElseThrow().transferId());
     }
 
+    @Test
+    void abortedSourceCannotBeFrozenOrCommittedByDelayedDuplicates() {
+        WorldlineTransferLifecycle lifecycle = new WorldlineTransferLifecycle(8);
+        assertEquals(APPLIED, lifecycle.freezeSource(PLAYER, TRANSFER, 4));
+        assertEquals(APPLIED, lifecycle.abortSource(PLAYER, TRANSFER, 4));
+        assertEquals(ALREADY_APPLIED, lifecycle.abortSource(PLAYER, TRANSFER, 4));
+        assertEquals(REJECTED_MISMATCH, lifecycle.freezeSource(PLAYER, TRANSFER, 4));
+        assertEquals(REJECTED_MISMATCH, lifecycle.commitSource(PLAYER, TRANSFER, 4, 5));
+        assertEquals(WorldlineTransferLifecycle.SourcePhase.ABORTED,
+            lifecycle.source(PLAYER).orElseThrow().phase());
+        assertEquals(1, lifecycle.tombstoneCount());
+        assertEquals(APPLIED, lifecycle.freezeSource(PLAYER, OTHER_TRANSFER, 4));
+        assertEquals(REJECTED_MISMATCH, lifecycle.abortSource(PLAYER, TRANSFER, 4));
+    }
+
+    @Test
+    void abortArrivingBeforeFreezeOrPrepareStillFencesDelayedCommands() {
+        WorldlineTransferLifecycle lifecycle = new WorldlineTransferLifecycle(8);
+        assertEquals(APPLIED, lifecycle.abortSource(PLAYER, TRANSFER, 4));
+        assertEquals(REJECTED_MISMATCH, lifecycle.freezeSource(PLAYER, TRANSFER, 4));
+        assertEquals(APPLIED, lifecycle.abortDestination(PLAYER, TRANSFER, 4));
+        assertEquals(ALREADY_APPLIED, lifecycle.abortDestination(PLAYER, TRANSFER, 4));
+        assertEquals(REJECTED_MISMATCH, lifecycle.prepareDestination(PLAYER, TRANSFER, 4));
+        assertEquals(APPLIED, lifecycle.prepareDestination(PLAYER, OTHER_TRANSFER, 4));
+    }
+
+    @Test
+    void cleanedSourceCannotBeRefrozenAndAbortHistoryRemainsBounded() {
+        WorldlineTransferLifecycle lifecycle = new WorldlineTransferLifecycle(2);
+        cleanSource(lifecycle, PLAYER);
+        assertEquals(REJECTED_MISMATCH, lifecycle.freezeSource(PLAYER, TRANSFER, 4));
+        for (int i = 0; i < 8; i++) {
+            assertEquals(APPLIED, lifecycle.abortSource(UUID.randomUUID(), TRANSFER, 4));
+        }
+        assertEquals(2, lifecycle.tombstoneCount());
+    }
+
     private static WorldlineTransferLifecycle committedDestination() {
         WorldlineTransferLifecycle lifecycle = new WorldlineTransferLifecycle(8);
         assertEquals(APPLIED, lifecycle.prepareDestination(PLAYER, TRANSFER, 4));

@@ -77,6 +77,7 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
     private static final AtomicBoolean STARTED = new AtomicBoolean();
     private static final WorldlineControlRequestExecutor REQUEST_EXECUTOR =
         new WorldlineControlRequestExecutor(16);
+    private static final WorldlinePlayerCommandLocks COMMAND_LOCKS = new WorldlinePlayerCommandLocks();
     private static final Map<UUID, Preparation> PREPARATIONS = new ConcurrentHashMap<>();
     private static final Map<UUID, FrozenPlayer> FROZEN_PLAYERS = new ConcurrentHashMap<>();
     private static final Map<UUID, FrozenPlayer> CLEANED_SOURCES = new ConcurrentHashMap<>();
@@ -194,83 +195,67 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
         final String expectedPartition = sourceCommand ? sourcePartitionId : destinationPartitionId;
         final long expectedEpoch = sourceCommand ? sourcePartitionEpoch : destinationPartitionEpoch;
         CommandResult result;
-        if (!knownCommand || playerSessionEpoch < 0 || playerStateVersion < 0
-            || routeGeneration < 0
-            || !serverId.equals(expectedServer) || !partitionId.equals(expectedPartition)
-            || partitionEpoch != expectedEpoch) {
-            result = CommandResult.rejected("identity, protocol, or ownership fence rejected");
-        } else if (command.equals("CHECK_PREPARE")) {
-            result = checkReady(target, compatibilityId, false);
-        } else if (command.equals("PREPARE")) {
-            result = checkReady(target, compatibilityId, true);
-            if (result.accepted()) {
-                result = prepareDestination(Objects.requireNonNull(target), transferId, playerId,
-                    playerSessionEpoch, preparationIdentity);
+        try (final var ignored = COMMAND_LOCKS.acquire(playerId)) {
+            if (!knownCommand || playerSessionEpoch < 0 || playerStateVersion < 0
+                || routeGeneration < 0
+                || !serverId.equals(expectedServer) || !partitionId.equals(expectedPartition)
+                || partitionEpoch != expectedEpoch) {
+                result = CommandResult.rejected("identity, protocol, or ownership fence rejected");
+            } else if (command.equals("CHECK_PREPARE")) {
+                result = checkReady(target, compatibilityId, false);
+            } else if (command.equals("PREPARE")) {
+                result = checkReady(target, compatibilityId, true);
                 if (result.accepted()) {
-                    final CommandResult lifecycle = lifecycleResult(
-                        LIFECYCLE.prepareDestination(playerId, transferId, playerSessionEpoch),
-                        "destination prepared");
-                    if (!lifecycle.accepted()) {
-                        discardPreparation(playerId, transferId);
-                        result = lifecycle;
-                    }
+                    result = prepareDestination(Objects.requireNonNull(target), transferId, playerId,
+                        playerSessionEpoch, preparationIdentity);
                 }
-            }
-        } else if (command.equals("ABORT")) {
-            final WorldlineTransferLifecycle.Outcome outcome =
-                LIFECYCLE.abortDestination(playerId, transferId, playerSessionEpoch);
-            result = outcome == WorldlineTransferLifecycle.Outcome.MISSING
-                ? discardPreparation(playerId, transferId)
-                : lifecycleThen(outcome, "destination aborted",
-                    () -> discardPreparation(playerId, transferId));
-        } else if (command.equals("FREEZE_SOURCE")) {
-            result = freezeSource(transferId, playerId, sourceServerId, destinationServerId,
-                sourcePartitionId, sourcePartitionEpoch, destinationPartitionId,
-                destinationPartitionEpoch, playerSessionEpoch, playerStateVersion,
-                preparationIdentity);
-            if (result.accepted()) {
-                final CommandResult lifecycle = lifecycleResult(
-                    LIFECYCLE.freezeSource(playerId, transferId, playerSessionEpoch),
-                    "source frozen");
-                if (!lifecycle.accepted()) {
-                    unfreezeSource(playerId, transferId);
-                    result = lifecycle;
+            } else if (command.equals("ABORT")) {
+                final WorldlineTransferLifecycle.Outcome outcome =
+                    LIFECYCLE.abortDestination(playerId, transferId, playerSessionEpoch);
+                result = outcome == WorldlineTransferLifecycle.Outcome.MISSING
+                    ? discardPreparation(playerId, transferId)
+                    : lifecycleThen(outcome, "destination aborted",
+                        () -> discardPreparation(playerId, transferId));
+            } else if (command.equals("FREEZE_SOURCE")) {
+                result = freezeSource(transferId, playerId, sourceServerId, destinationServerId,
+                    sourcePartitionId, sourcePartitionEpoch, destinationPartitionId,
+                    destinationPartitionEpoch, playerSessionEpoch, playerStateVersion,
+                    preparationIdentity);
+            } else if (command.equals("ABORT_SOURCE")) {
+                final WorldlineTransferLifecycle.Outcome outcome =
+                    LIFECYCLE.abortSource(playerId, transferId, playerSessionEpoch);
+                result = outcome == WorldlineTransferLifecycle.Outcome.MISSING
+                    ? unfreezeSource(playerId, transferId)
+                    : lifecycleThen(outcome, "source aborted",
+                        () -> unfreezeSource(playerId, transferId));
+            } else if (command.equals("STAGE_SNAPSHOT")) {
+                result = stageSnapshot(payload, transferId, playerId, sourceServerId,
+                    destinationServerId, sourcePartitionId, sourcePartitionEpoch,
+                    destinationPartitionId, destinationPartitionEpoch, playerSessionEpoch,
+                    playerStateVersion, preparationIdentity);
+                if (result.accepted()) {
+                    result = lifecycleResult(
+                        LIFECYCLE.stageDestination(playerId, transferId, playerSessionEpoch),
+                        "snapshot staged");
                 }
+            } else if (command.equals("COMMIT_DESTINATION")) {
+                result = commitDestination(playerId, transferId, playerSessionEpoch,
+                    playerStateVersion, preparationIdentity);
+            } else if (command.equals("COMMIT_SOURCE")) {
+                result = commitSource(playerId, transferId, playerSessionEpoch, playerStateVersion,
+                    preparationIdentity);
+            } else if (command.equals("ACTIVATE_DESTINATION")) {
+                result = activateDestination(playerId, transferId, playerSessionEpoch,
+                    playerStateVersion, preparationIdentity);
+            } else if (command.equals("CLEAN_SOURCE")) {
+                result = cleanSource(playerId, transferId, playerSessionEpoch, playerStateVersion,
+                    preparationIdentity);
+            } else if (command.equals("RETIRE_DESTINATION")) {
+                result = retireDestination(playerId, transferId, playerSessionEpoch,
+                    playerStateVersion, preparationIdentity);
+            } else {
+                throw new IllegalStateException("known command was not dispatched");
             }
-        } else if (command.equals("ABORT_SOURCE")) {
-            final WorldlineTransferLifecycle.Outcome outcome =
-                LIFECYCLE.abortSource(playerId, transferId, playerSessionEpoch);
-            result = outcome == WorldlineTransferLifecycle.Outcome.MISSING
-                ? unfreezeSource(playerId, transferId)
-                : lifecycleThen(outcome, "source aborted",
-                    () -> unfreezeSource(playerId, transferId));
-        } else if (command.equals("STAGE_SNAPSHOT")) {
-            result = stageSnapshot(payload, transferId, playerId, sourceServerId,
-                destinationServerId, sourcePartitionId, sourcePartitionEpoch,
-                destinationPartitionId, destinationPartitionEpoch, playerSessionEpoch,
-                playerStateVersion, preparationIdentity);
-            if (result.accepted()) {
-                result = lifecycleResult(
-                    LIFECYCLE.stageDestination(playerId, transferId, playerSessionEpoch),
-                    "snapshot staged");
-            }
-        } else if (command.equals("COMMIT_DESTINATION")) {
-            result = commitDestination(playerId, transferId, playerSessionEpoch,
-                playerStateVersion, preparationIdentity);
-        } else if (command.equals("COMMIT_SOURCE")) {
-            result = commitSource(playerId, transferId, playerSessionEpoch, playerStateVersion,
-                preparationIdentity);
-        } else if (command.equals("ACTIVATE_DESTINATION")) {
-            result = activateDestination(playerId, transferId, playerSessionEpoch,
-                playerStateVersion, preparationIdentity);
-        } else if (command.equals("CLEAN_SOURCE")) {
-            result = cleanSource(playerId, transferId, playerSessionEpoch, playerStateVersion,
-                preparationIdentity);
-        } else if (command.equals("RETIRE_DESTINATION")) {
-            result = retireDestination(playerId, transferId, playerSessionEpoch,
-                playerStateVersion, preparationIdentity);
-        } else {
-            throw new IllegalStateException("known command was not dispatched");
         }
 
         final DataOutputStream output = new DataOutputStream(socket.getOutputStream());
@@ -545,7 +530,7 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
                     return lifecycle;
                 }
                 preparation.attachedListener.worldlineSuppressInitialPackets = false;
-                preparation.attachedListener.worldlineAwaitingFirstReplayMovement = true;
+                preparation.attachedListener.worldlineFirstReplayMovement.arm();
                 preparation.attachedListener.resumeFlushing();
                 final CommandResult cleaned = lifecycleResult(LIFECYCLE.cleanDestination(
                     playerId, transferId, committedEpoch - 1, committedEpoch),
@@ -717,16 +702,24 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
         return onServerThread(() -> {
             final FrozenPlayer existing = FROZEN_PLAYERS.get(playerId);
             if (existing != null) {
-                return existing.matches(transferId, playerSessionEpoch, playerStateVersion,
-                    identity)
-                    ? CommandResult.accepted("already frozen", existing.snapshot)
-                    : CommandResult.rejected("player is frozen by another transfer");
+                if (!existing.matches(transferId, playerSessionEpoch, playerStateVersion, identity)) {
+                    return CommandResult.rejected("player is frozen by another transfer");
+                }
+                final CommandResult lifecycle = lifecycleResult(
+                    LIFECYCLE.freezeSource(playerId, transferId, playerSessionEpoch), "source frozen");
+                return lifecycle.accepted()
+                    ? CommandResult.accepted("already frozen", existing.snapshot) : lifecycle;
             }
             final MinecraftServer server = MinecraftServer.getServer();
             final ServerPlayer player = server.getPlayerList().getPlayer(playerId);
             final String unsupported = unsupportedState(player);
             if (unsupported != null) {
                 return CommandResult.rejected(unsupported);
+            }
+            final CommandResult lifecycle = lifecycleResult(
+                LIFECYCLE.freezeSource(playerId, transferId, playerSessionEpoch), "source frozen");
+            if (!lifecycle.accepted()) {
+                return lifecycle;
             }
             FROZEN_PLAYERS.put(playerId, new FrozenPlayer(transferId, playerSessionEpoch,
                 playerStateVersion, new byte[0], 0, identity));
@@ -748,6 +741,7 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
                 return CommandResult.accepted("source frozen", snapshot);
             } catch (IOException | RuntimeException e) {
                 FROZEN_PLAYERS.remove(playerId);
+                LIFECYCLE.abortSource(playerId, transferId, playerSessionEpoch);
                 return CommandResult.rejected("snapshot failed: " + e.getMessage());
             }
         });
@@ -1097,6 +1091,12 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
         if (server.getPlayerList().getPlayer(playerId) != null) {
             return CommandResult.rejected("player is already active on destination");
         }
+        final CommandResult lifecycle = lifecycleResult(
+            LIFECYCLE.prepareDestination(playerId, transferId, playerSessionEpoch),
+            "destination prepared");
+        if (!lifecycle.accepted()) {
+            return lifecycle;
+        }
         final Preparation preparation = new Preparation(transferId, playerId,
             playerSessionEpoch, target, identity);
         final Preparation existing = PREPARATIONS.putIfAbsent(playerId, preparation);
@@ -1112,6 +1112,7 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
             server.execute(() -> startPreparation(server, preparation));
         } catch (RuntimeException e) {
             PREPARATIONS.remove(playerId, preparation);
+            LIFECYCLE.abortDestination(playerId, transferId, playerSessionEpoch);
             return CommandResult.rejected("server stopped before preparation");
         }
         return awaitPreparation(preparation);
@@ -1200,6 +1201,7 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
             return CommandResult.rejected("different transfer is prepared");
         }
         preparation.cancelled = true;
+        LIFECYCLE.abortDestination(playerId, transferId, preparation.playerSessionEpoch);
         PREPARATIONS.remove(playerId, preparation);
         preparation.ready.completeExceptionally(new IllegalStateException("preparation discarded"));
         final MinecraftServer server = MinecraftServer.getServer();
@@ -1224,6 +1226,8 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
 
     private static void failPreparation(final Preparation preparation, final String detail) {
         preparation.cancelled = true;
+        LIFECYCLE.abortDestination(preparation.playerId, preparation.transferId,
+            preparation.playerSessionEpoch);
         PREPARATIONS.remove(preparation.playerId, preparation);
         cleanupPreparation(preparation);
         preparation.ready.completeExceptionally(new IllegalStateException(detail));

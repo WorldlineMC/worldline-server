@@ -983,7 +983,7 @@
                                      this.lastGoodY = this.player.getY();
                                      this.lastGoodZ = this.player.getZ();
 +                                    if (worldlineFirstReplay && this.worldlineTransferId != null) {
-+                                        LOGGER.info("Worldline processed first replay movement player={} transfer={} "
++                                        LOGGER.info("Worldline applied first replay movement player={} transfer={} "
 +                                                + "has_position={} x={} y={} z={} tick={}",
 +                                            this.player.getUUID(), this.worldlineTransferId,
 +                                            packet.hasPosition(), this.player.getX(), this.player.getY(), this.player.getZ(),

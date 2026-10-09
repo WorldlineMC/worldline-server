@@ -52,7 +52,7 @@
      public ServerPlayer player;
 +    public boolean worldlineSuppressInitialPackets;
 +    public @Nullable UUID worldlineTransferId;
-+    public boolean worldlineAwaitingFirstReplayMovement;
++    public final io.papermc.paper.worldline.WorldlineFirstReplayMovement worldlineFirstReplayMovement = new io.papermc.paper.worldline.WorldlineFirstReplayMovement();
 +    public boolean worldlineLoggedRejectedFrozenMovement;
      public final PlayerChunkSender chunkSender;
      private int tickCount;
@@ -715,7 +715,7 @@
          }
      }
  
-@@ -1063,11 +_,21 @@
+@@ -1063,11 +_,22 @@
      @Override
      public void handleMovePlayer(final ServerboundMovePlayerPacket packet) {
          PacketUtils.ensureRunningOnSameThread(packet, this, this.player.level());
@@ -729,6 +729,7 @@
 +            }
 +            return;
 +        }
++        final boolean worldlineFirstReplay = this.worldlineFirstReplayMovement.beginMovement();
          if (containsInvalidValues(packet.getX(0.0), packet.getY(0.0), packet.getZ(0.0), packet.getYRot(0.0F), packet.getXRot(0.0F))) {
 -            this.disconnect(Component.translatable("multiplayer.disconnect.invalid_player_movement"));
 +            this.disconnect(Component.translatable("multiplayer.disconnect.invalid_player_movement"), org.bukkit.event.player.PlayerKickEvent.Cause.INVALID_PLAYER_MOVEMENT); // Paper - kick event cause
@@ -739,19 +740,10 @@
                  if (this.tickCount == 0) {
                      this.resetPosition();
                  }
-@@ -1081,10 +_,24 @@
+@@ -1081,10 +_,15 @@
                          double targetX = clampHorizontal(packet.getX(this.player.getX()));
                          double targetY = clampVertical(packet.getY(this.player.getY()));
                          double targetZ = clampHorizontal(packet.getZ(this.player.getZ()));
-+                        if (this.worldlineAwaitingFirstReplayMovement
-+                            && this.worldlineTransferId != null) {
-+                            this.worldlineAwaitingFirstReplayMovement = false;
-+                            LOGGER.info("Worldline processed first replay movement player={} transfer={} "
-+                                    + "has_position={} x={} y={} z={} tick={}",
-+                                this.player.getUUID(), this.worldlineTransferId,
-+                                packet.hasPosition(), targetX, targetY, targetZ,
-+                                this.server.getTickCount());
-+                        }
                          if (this.player.isPassenger()) {
                              this.player.absSnapTo(this.player.getX(), this.player.getY(), this.player.getZ(), targetYRot, targetXRot);
                              this.player.level().getChunkSource().move(this.player);
@@ -987,9 +979,16 @@
                                      this.player.absSnapTo(targetX, targetY, targetZ, targetYRot, targetXRot);
                                      boolean isAutoSpinAttack = this.player.isAutoSpinAttack();
                                      this.clientIsFloating = oyDist >= -0.03125
-@@ -1192,7 +_,7 @@
+@@ -1192,7 +_,14 @@
                                      this.lastGoodY = this.player.getY();
                                      this.lastGoodZ = this.player.getZ();
++                                    if (worldlineFirstReplay && this.worldlineTransferId != null) {
++                                        LOGGER.info("Worldline processed first replay movement player={} transfer={} "
++                                                + "has_position={} x={} y={} z={} tick={}",
++                                            this.player.getUUID(), this.worldlineTransferId,
++                                            packet.hasPosition(), this.player.getX(), this.player.getY(), this.player.getZ(),
++                                            this.server.getTickCount());
++                                    }
                                  } else {
 -                                    this.teleport(startX, startY, startZ, targetYRot, targetXRot);
 +                                    this.internalTeleport(startX, startY, startZ, targetYRot, targetXRot); // CraftBukkit - SPIGOT-1807: Don't call teleport event, when the client thinks the player is falling, because the chunks are not loaded on the client yet.

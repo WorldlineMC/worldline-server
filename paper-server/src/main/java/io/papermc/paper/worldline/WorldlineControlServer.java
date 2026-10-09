@@ -530,7 +530,7 @@ private static final Logger LOGGER = LoggerFactory.getLogger("WorldlineControl")
                     return lifecycle;
                 }
                 preparation.attachedListener.worldlineSuppressInitialPackets = false;
-                preparation.attachedListener.worldlineAwaitingFirstReplayMovement = true;
+                preparation.attachedListener.worldlineFirstReplayMovement.arm();
                 preparation.attachedListener.resumeFlushing();
                 final CommandResult cleaned = lifecycleResult(LIFECYCLE.cleanDestination(
                     playerId, transferId, committedEpoch - 1, committedEpoch),

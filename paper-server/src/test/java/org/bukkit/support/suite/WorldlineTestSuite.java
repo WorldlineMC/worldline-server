@@ -1,6 +1,7 @@
 package org.bukkit.support.suite;
 
 import io.papermc.paper.worldline.WorldlineControlServerTest;
+import io.papermc.paper.worldline.WorldlineFirstReplayMovementTest;
 import io.papermc.paper.worldline.WorldlineControlRequestExecutorTest;
 import io.papermc.paper.worldline.WorldlineDestinationAttachmentTest;
 import io.papermc.paper.worldline.WorldlineMainThreadOperationTest;
@@ -16,6 +17,6 @@ import org.junit.platform.suite.api.SuiteDisplayName;
 @SelectClasses({WorldlineControlServerTest.class, WorldlineControlRequestExecutorTest.class,
     WorldlineDestinationAttachmentTest.class, WorldlineMainThreadOperationTest.class,
     WorldlineResumeContextTest.class, WorldlineTransferLifecycleTest.class,
-    WorldlinePlayerCommandLocksTest.class})
+    WorldlinePlayerCommandLocksTest.class, WorldlineFirstReplayMovementTest.class})
 public class WorldlineTestSuite {
 }
